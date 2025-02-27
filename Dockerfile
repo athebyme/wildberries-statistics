@@ -9,23 +9,24 @@ COPY go.mod go.sum ./
 RUN go mod download
 
 # Копируем исходный код
-COPY *.go ./
+COPY . .
+
+WORKDIR /app/cmd/wbmonitoring
 
 # Компилируем приложение (с отключенным CGO для статической сборки)
-RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o wb-monitoring .
+RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o wb-monitoring main.go
 
 # Финальный образ на базе Debian
 FROM debian:bullseye-slim
 
-# Устанавливаем необходимые пакеты (например, сертификаты и tzdata)
 RUN apt-get update && \
     apt-get install -y ca-certificates tzdata && \
     rm -rf /var/lib/apt/lists/*
 
-WORKDIR /app
+WORKDIR /cmd/wbmonitoring
 
 # Копируем скомпилированное приложение из builder-стадии
-COPY --from=builder /app/wb-monitoring .
+COPY --from=builder /app/cmd/wbmonitoring/wb-monitoring .
 
 # Запускаем приложение
 CMD ["./wb-monitoring"]
