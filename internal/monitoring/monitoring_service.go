@@ -413,7 +413,7 @@ func (m *MonitoringService) CheckPriceChanges(ctx context.Context, product *mode
 	if priceDiff <= -m.config.PriceThreshold || priceDiff >= m.config.PriceThreshold {
 		message := fmt.Sprintf(
 			"🚨 Обнаружено значительное изменение цены!\n"+
-				"Товар: %s (арт. %s)\n"+
+				"Товар: %s (арт. `%s`)\n"+
 				"Старая цена: %d руб (скидка %d%%)\n"+
 				"Новая цена: %d руб (скидка %d%%)\n"+
 				"Изменение: %.2f%%",
@@ -465,7 +465,7 @@ func (m *MonitoringService) CheckStockChanges(ctx context.Context, product *mode
 	if stockDiff <= -m.config.StockThreshold || stockDiff >= m.config.StockThreshold {
 		message := fmt.Sprintf(
 			"📦 Обнаружено значительное изменение остатков!\n"+
-				"Товар: %s (арт. %s)\n"+
+				"Товар: %s (арт. `%s`)\n"+
 				"Старое количество: %d шт.\n"+
 				"Новое количество: %d шт.\n"+
 				"Изменение: %.2f%%",
