@@ -7,6 +7,12 @@ import (
 	"time"
 )
 
+type Seller struct {
+	Name      string `json:"name"`
+	Sid       string `json:"sid"`
+	TradeMark string `json:"tradeMark"`
+}
+
 // Структуры для запросов и ответов API
 
 // Склады WB

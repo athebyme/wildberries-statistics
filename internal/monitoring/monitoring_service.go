@@ -176,6 +176,23 @@ func (m *MonitoringService) RunMonitoring(ctx context.Context) error {
 	}
 }
 
+func (m *MonitoringService) SendGreetings(ctx context.Context) error {
+	log.Println("Sending greetings")
+	seller, err := api.GetSellerInfo(ctx, *m.httpClient, m.config.ApiKey, rate.NewLimiter(rate.Every(1*time.Minute), 1))
+	if err != nil {
+		err = m.SendTelegramAlert("Ошибка получения информации продавца с WB")
+		if err != nil {
+			return err
+		}
+		log.Fatalf("Error getting seller info: %v", err)
+	}
+	err = m.SendTelegramAlertWithParseMode(fmt.Sprintf("`%s`, успешная авторизация WB", seller.Name), "Markdown")
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
 // ProcessMonitoring обрабатывает данные мониторинга.
 func (m *MonitoringService) ProcessMonitoring(ctx context.Context) error {
 	log.Println("Starting monitoring cycle")
@@ -423,7 +440,7 @@ func (m *MonitoringService) CheckPriceChanges(ctx context.Context, product *mode
 			priceDiff,
 		)
 
-		if err := m.SendTelegramAlert(message); err != nil {
+		if err := m.SendTelegramAlertWithParseMode(message, "Markdown"); err != nil {
 			log.Printf("Failed to send Telegram alert about price change: %v", err)
 		}
 	}
@@ -475,7 +492,7 @@ func (m *MonitoringService) CheckStockChanges(ctx context.Context, product *mode
 			stockDiff,
 		)
 
-		if err := m.SendTelegramAlert(message); err != nil {
+		if err := m.SendTelegramAlertWithParseMode(message, "Markdown"); err != nil {
 			log.Printf("Failed to send Telegram alert about stock change: %v", err)
 		}
 	}
@@ -526,6 +543,10 @@ func (m *MonitoringService) SaveStock(ctx context.Context, stock *models.StockRe
 // SendTelegramAlert sends a message via Telegram.
 func (m *MonitoringService) SendTelegramAlert(message string) error {
 	return telegram.SendTelegramAlert(m.bot, m.config.TelegramChatID, message)
+}
+
+func (m *MonitoringService) SendTelegramAlertWithParseMode(message, parseMode string) error {
+	return telegram.SendTelegramAlertWithParseMode(m.bot, m.config.TelegramChatID, message, parseMode)
 }
 
 // InitDB initializes the database schema.

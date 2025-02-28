@@ -15,6 +15,36 @@ import (
 	"golang.org/x/time/rate"
 )
 
+func GetSellerInfo(ctx context.Context, client http.Client, apiKey string, limiter *rate.Limiter) (models.Seller, error) {
+	if err := limiter.Wait(ctx); err != nil {
+		return models.Seller{}, fmt.Errorf("%w: %v", app_errors.ErrRateLimiter, err)
+	}
+
+	req, err := http.NewRequest("GET", "https://common-api.wildberries.ru/api/v1/seller-info", nil)
+	if err != nil {
+		return models.Seller{}, fmt.Errorf("creating request: %w", err)
+	}
+
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return models.Seller{}, fmt.Errorf("executing request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return models.Seller{}, fmt.Errorf("unexpected status code: %s", resp.Status)
+	}
+
+	var seller models.Seller
+	if err := json.NewDecoder(resp.Body).Decode(&seller); err != nil {
+		return models.Seller{}, fmt.Errorf("decoding response: %w", err)
+	}
+
+	return seller, nil
+}
+
 // GetWarehouses retrieves warehouses from Wildberries API.
 func GetWarehouses(ctx context.Context, client *http.Client, apiKey string, limiter *rate.Limiter) ([]models.Warehouse, error) {
 	if err := limiter.Wait(ctx); err != nil {
