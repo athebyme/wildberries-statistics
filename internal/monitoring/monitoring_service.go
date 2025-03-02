@@ -17,7 +17,6 @@ import (
 	"wbmonitoring/monitoring/internal/search"
 	"wbmonitoring/monitoring/internal/telegram"
 
-	"github.com/go-telegram-bot-api/telegram-bot-api"
 	"github.com/jmoiron/sqlx"
 	_ "github.com/lib/pq"
 	"golang.org/x/time/rate"
@@ -30,9 +29,10 @@ type MonitoringService struct {
 	pricesLimiter    *rate.Limiter
 	stocksLimiter    *rate.Limiter
 	warehouseLimiter *rate.Limiter
-	bot              *tgbotapi.BotAPI
 	searchEngine     *search.SearchEngine
 	httpClient       *http.Client
+	telegramBot      *telegram.Bot
+	recordCleanupSvc *RecordCleanupService
 }
 
 // NewMonitoringService creates a new MonitoringService.
@@ -42,7 +42,7 @@ func NewMonitoringService(cfg config.Config) (*MonitoringService, error) {
 		return nil, fmt.Errorf("connecting to database: %w", err)
 	}
 
-	bot, err := tgbotapi.NewBotAPI(cfg.TelegramToken)
+	telegramBot, err := telegram.NewBot(cfg.TelegramToken, cfg.TelegramChatID, database, cfg.AllowedUserIDs)
 	if err != nil {
 		return nil, fmt.Errorf("initializing telegram bot: %w", err)
 	}
@@ -54,6 +54,13 @@ func NewMonitoringService(cfg config.Config) (*MonitoringService, error) {
 		RequestTimeout: cfg.RequestTimeout,
 		ApiKey:         cfg.ApiKey, // Передаем API ключ
 	}
+
+	cleanupSvc := NewRecordCleanupService(
+		database,
+		24*time.Hour,    // Запускаем очистку раз в сутки
+		30*24*time.Hour, // Храним данные за 30 дней
+	)
+
 	searchEngine := search.NewSearchEngine(database.DB, os.Stdout, searchConfig) // Используем db.DB, так как SearchEngine ожидает *sql.DB
 	client := http.Client{Timeout: cfg.RequestTimeout}
 	return &MonitoringService{
@@ -62,7 +69,8 @@ func NewMonitoringService(cfg config.Config) (*MonitoringService, error) {
 		pricesLimiter:    rate.NewLimiter(rate.Every(time.Second*6/10), 1), // 10 запросов за 6 секунд
 		stocksLimiter:    rate.NewLimiter(rate.Every(time.Minute/300), 10), // 300 запросов в минуту
 		warehouseLimiter: rate.NewLimiter(rate.Every(time.Minute/300), 10), // 300 запросов в минуту
-		bot:              bot,
+		telegramBot:      telegramBot,
+		recordCleanupSvc: cleanupSvc,
 		searchEngine:     searchEngine, // Инициализируем SearchEngine
 		httpClient:       &client,
 	}, nil
@@ -81,16 +89,8 @@ func (m *MonitoringService) RunProductUpdater(ctx context.Context) error {
 			log.Println("Starting product update cycle")
 			if err := m.UpdateProducts(ctx); err != nil {
 				log.Printf("Error during product update: %v", err)
-				err := m.SendTelegramAlert(fmt.Sprintf("Ошибка при обновлении продуктов: %v", err))
-				if err != nil {
-					return err
-				} // Уведомление об ошибке
 			} else {
 				log.Println("Product update cycle completed successfully")
-				err := m.SendTelegramAlert(fmt.Sprintf("Обновление продуктов успешно завершено"))
-				if err != nil {
-					return err
-				} // Уведомление об успехе
 			}
 		}
 	}
@@ -161,17 +161,71 @@ func (m *MonitoringService) ProcessNomenclature(ctx context.Context, nomenclatur
 
 // RunMonitoring запускает основной цикл мониторинга.
 func (m *MonitoringService) RunMonitoring(ctx context.Context) error {
-	monitoringTicker := time.NewTicker(m.config.MonitoringInterval)
-	defer monitoringTicker.Stop()
+	// Отправляем приветственное сообщение
+	if err := m.telegramBot.SendTelegramAlert("🔄 Сервис мониторинга запущен"); err != nil {
+		log.Printf("Failed to send welcome message: %v", err)
+	}
+
+	// Запускаем бота в отдельной горутине
+	go m.telegramBot.StartBot(ctx)
+
+	// Запускаем сервис очистки записей
+	go m.recordCleanupSvc.RunCleanupProcess(ctx)
+
+	// Запускаем процесс обновления информации о товарах
+	go m.RunProductUpdater(ctx)
+
+	// Запускаем отправку ежедневных отчетов
+	go m.runDailyReporting(ctx)
+
+	// Основной цикл мониторинга
+	ticker := time.NewTicker(m.config.MonitoringInterval)
+	defer ticker.Stop()
 
 	for {
 		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-monitoringTicker.C:
+		case <-ticker.C:
 			if err := m.ProcessMonitoring(ctx); err != nil {
-				log.Printf("Error during monitoring: %v", err)
+				log.Printf("Error during monitoring process: %v", err)
 			}
+		case <-ctx.Done():
+			// Отправляем сообщение о завершении работы
+			if err := m.telegramBot.SendTelegramAlert("⚠️ Сервис мониторинга остановлен"); err != nil {
+				log.Printf("Failed to send shutdown message: %v", err)
+			}
+			return ctx.Err()
+		}
+	}
+}
+
+// runDailyReporting запускает процесс отправки ежедневных отчетов
+func (m *MonitoringService) runDailyReporting(ctx context.Context) {
+	// Вычисляем время до следующего запуска (10:00 утра)
+	now := time.Now()
+	nextRun := time.Date(now.Year(), now.Month(), now.Day(), 10, 0, 0, 0, now.Location())
+	if now.After(nextRun) {
+		nextRun = nextRun.Add(24 * time.Hour)
+	}
+
+	initialDelay := nextRun.Sub(now)
+	log.Printf("Daily report scheduled at %s (in %s)", nextRun.Format("15:04:05"), initialDelay)
+
+	// Ждем до первого запуска
+	timer := time.NewTimer(initialDelay)
+
+	for {
+		select {
+		case <-timer.C:
+			// Отправляем ежедневный отчет
+			if err := m.telegramBot.SendDailyReport(ctx); err != nil {
+				log.Printf("Error sending daily report: %v", err)
+			}
+
+			// Настраиваем таймер на следующие сутки
+			timer.Reset(24 * time.Hour)
+		case <-ctx.Done():
+			timer.Stop()
+			return
 		}
 	}
 }
@@ -180,13 +234,13 @@ func (m *MonitoringService) SendGreetings(ctx context.Context) error {
 	log.Println("Sending greetings")
 	seller, err := api.GetSellerInfo(ctx, *m.httpClient, m.config.ApiKey, rate.NewLimiter(rate.Every(1*time.Minute), 1))
 	if err != nil {
-		err = m.SendTelegramAlert("Ошибка получения информации продавца с WB")
+		err = m.telegramBot.SendTelegramAlert("Ошибка получения информации продавца с WB")
 		if err != nil {
 			return err
 		}
 		log.Fatalf("Error getting seller info: %v", err)
 	}
-	err = m.SendTelegramAlertWithParseMode(fmt.Sprintf("`%s`, успешная авторизация WB", seller.Name), "Markdown")
+	err = m.telegramBot.SendTelegramAlertWithParseMode(fmt.Sprintf("`%s`, успешная авторизация WB", seller.Name), "Markdown")
 	if err != nil {
 		return err
 	}
@@ -440,7 +494,7 @@ func (m *MonitoringService) CheckPriceChanges(ctx context.Context, product *mode
 			priceDiff,
 		)
 
-		if err := m.SendTelegramAlertWithParseMode(message, "Markdown"); err != nil {
+		if err := m.telegramBot.SendTelegramAlertWithParseMode(message, "Markdown"); err != nil {
 			log.Printf("Failed to send Telegram alert about price change: %v", err)
 		}
 	}
@@ -450,14 +504,14 @@ func (m *MonitoringService) CheckPriceChanges(ctx context.Context, product *mode
 
 // CheckStockChanges проверяет изменения остатков и отправляет уведомления.
 func (m *MonitoringService) CheckStockChanges(ctx context.Context, product *models.ProductRecord, newStock *models.StockRecord) error {
-	lastStock, err := m.GetLastStock(ctx, product.ID, newStock.WarehouseID)
+	lastStock, err := db.GetLastStock(ctx, m.db, product.ID, newStock.WarehouseID)
 	if err != nil {
 		return fmt.Errorf("getting last stock: %w", err)
 	}
 
 	// Если нет предыдущих остатков - просто сохраняем текущие
 	if lastStock == nil {
-		err := m.SaveStock(ctx, newStock)
+		err := db.SaveStock(ctx, m.db, newStock)
 		if err != nil {
 			return fmt.Errorf("saving initial stock: %w", err)
 		}
@@ -473,7 +527,7 @@ func (m *MonitoringService) CheckStockChanges(ctx context.Context, product *mode
 	}
 
 	// Сохраняем новые остатки
-	err = m.SaveStock(ctx, newStock)
+	err = db.SaveStock(ctx, m.db, newStock)
 	if err != nil {
 		return fmt.Errorf("saving stock: %w", err)
 	}
@@ -492,7 +546,7 @@ func (m *MonitoringService) CheckStockChanges(ctx context.Context, product *mode
 			stockDiff,
 		)
 
-		if err := m.SendTelegramAlertWithParseMode(message, "Markdown"); err != nil {
+		if err := m.telegramBot.SendTelegramAlertWithParseMode(message, "Markdown"); err != nil {
 			log.Printf("Failed to send Telegram alert about stock change: %v", err)
 		}
 	}
@@ -538,15 +592,6 @@ func (m *MonitoringService) SavePrice(ctx context.Context, price *models.PriceRe
 // SaveStock saves a stock record to the database.
 func (m *MonitoringService) SaveStock(ctx context.Context, stock *models.StockRecord) error {
 	return db.SaveStock(ctx, m.db, stock)
-}
-
-// SendTelegramAlert sends a message via Telegram.
-func (m *MonitoringService) SendTelegramAlert(message string) error {
-	return telegram.SendTelegramAlert(m.bot, m.config.TelegramChatID, message)
-}
-
-func (m *MonitoringService) SendTelegramAlertWithParseMode(message, parseMode string) error {
-	return telegram.SendTelegramAlertWithParseMode(m.bot, m.config.TelegramChatID, message, parseMode)
 }
 
 // InitDB initializes the database schema.

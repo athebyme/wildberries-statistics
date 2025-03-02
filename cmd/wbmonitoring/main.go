@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"errors"
-	"fmt"
 	"log"
 	"wbmonitoring/monitoring/internal/config"
 	"wbmonitoring/monitoring/internal/monitoring"
@@ -45,20 +44,10 @@ func main() {
 
 	if productCount == 0 {
 		log.Println("Products table is empty, starting initial product load...")
-		err = service.SendTelegramAlert(fmt.Sprintf("Products table is empty, starting initial product load..."))
-		if err != nil {
-			log.Printf("Failed to send Telegram alert: %v", err)
-		}
 		if err := service.UpdateProducts(ctx); err != nil {
-			log.Printf("Initial product load failed: %v", err)
-			err = service.SendTelegramAlert(fmt.Sprintf("Initial product load failed: %v", err))
 			log.Fatalf("Initial product load failed: %v", err) // Stop if initial load fails critically
 		} else {
 			log.Println("Initial product load completed successfully.")
-			err = service.SendTelegramAlert(fmt.Sprintf("Initial product load completed successfully."))
-			if err != nil {
-				return
-			}
 		}
 	} else {
 		log.Printf("Products table already contains %d products. Skipping initial load.", productCount)
@@ -67,10 +56,6 @@ func main() {
 	log.Println("Starting Wildberries Monitoring Service")
 
 	err = service.SendGreetings(ctx)
-	if err != nil {
-		log.Fatalf("Monitoring service stopped with error: %v", err)
-	}
-	err = service.SendTelegramAlert(fmt.Sprintf("Мониторинг запущен"))
 	if err != nil {
 		log.Fatalf("Monitoring service stopped with error: %v", err)
 	}

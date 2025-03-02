@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"time"
 	"wbmonitoring/monitoring/internal/models"
 
 	"github.com/jmoiron/sqlx"
@@ -69,6 +70,34 @@ CREATE TABLE IF NOT EXISTS stocks (
 CREATE INDEX IF NOT EXISTS idx_stocks_product_id ON stocks(product_id);
 CREATE INDEX IF NOT EXISTS idx_stocks_warehouse_id ON stocks(warehouse_id);
 CREATE INDEX IF NOT EXISTS idx_stocks_recorded_at ON stocks(recorded_at);
+
+CREATE TABLE IF NOT EXISTS hourly_price_data (
+    id SERIAL PRIMARY KEY,
+    product_id INTEGER NOT NULL,
+    size_id INTEGER NOT NULL,
+    price INTEGER NOT NULL,
+    discount INTEGER NOT NULL,
+    club_discount INTEGER NOT NULL,
+    final_price INTEGER NOT NULL,
+    club_final_price INTEGER NOT NULL,
+    currency_iso_code VARCHAR(8) NOT NULL,
+    tech_size_name VARCHAR(20) NOT NULL,
+    hour_timestamp TIMESTAMP NOT NULL,
+    UNIQUE(product_id, size_id, hour_timestamp)
+);
+
+CREATE TABLE IF NOT EXISTS hourly_stock_data (
+    id SERIAL PRIMARY KEY,
+    product_id INTEGER NOT NULL,
+    warehouse_id BIGINT NOT NULL,
+    amount INTEGER NOT NULL,
+    hour_timestamp TIMESTAMP NOT NULL,
+    UNIQUE(product_id, warehouse_id, hour_timestamp)
+);
+
+CREATE INDEX IF NOT EXISTS idx_hourly_price_time ON hourly_price_data(hour_timestamp);
+CREATE INDEX IF NOT EXISTS idx_hourly_stock_time ON hourly_stock_data(hour_timestamp);
+
 `
 
 // InitDB initializes the database schema.
@@ -197,4 +226,38 @@ func UpdateStockCheckStatus(ctx context.Context, db *sqlx.DB, productID int) err
 	}
 
 	return nil
+}
+
+// GetAllWarehouses получает все склады из базы данных
+func GetAllWarehouses(ctx context.Context, db *sqlx.DB) ([]models.Warehouse, error) {
+	warehouses := []models.Warehouse{}
+	err := db.SelectContext(ctx, &warehouses, "SELECT * FROM warehouses")
+	if err != nil {
+		return nil, fmt.Errorf("fetching warehouses from DB: %w", err)
+	}
+	return warehouses, nil
+}
+
+// GetPricesForPeriod получает историю цен товара за период
+func GetPricesForPeriod(ctx context.Context, db *sqlx.DB, productID int, startDate, endDate time.Time) ([]models.PriceRecord, error) {
+	prices := []models.PriceRecord{}
+	err := db.SelectContext(ctx, &prices,
+		"SELECT * FROM prices WHERE product_id = $1 AND recorded_at BETWEEN $2 AND $3 ORDER BY recorded_at",
+		productID, startDate, endDate)
+	if err != nil {
+		return nil, fmt.Errorf("fetching prices for period from DB: %w", err)
+	}
+	return prices, nil
+}
+
+// GetStocksForPeriod получает историю остатков товара на складе за период
+func GetStocksForPeriod(ctx context.Context, db *sqlx.DB, productID int, warehouseID int64, startDate, endDate time.Time) ([]models.StockRecord, error) {
+	stocks := []models.StockRecord{}
+	err := db.SelectContext(ctx, &stocks,
+		"SELECT * FROM stocks WHERE product_id = $1 AND warehouse_id = $2 AND recorded_at BETWEEN $3 AND $4 ORDER BY recorded_at",
+		productID, warehouseID, startDate, endDate)
+	if err != nil {
+		return nil, fmt.Errorf("fetching stocks for period from DB: %w", err)
+	}
+	return stocks, nil
 }

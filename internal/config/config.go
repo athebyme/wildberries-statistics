@@ -35,6 +35,7 @@ type Config struct {
 	PGConnString          string
 	PriceThreshold        float64
 	StockThreshold        float64
+	AllowedUserIDs        []int64
 }
 
 // LoadConfig loads the configuration from environment variables.
@@ -53,6 +54,7 @@ func LoadConfig() Config {
 		PGConnString:          getEnvString("PG_CONN_STRING", "postgres://bananzza:bananzza_monitor@localhost:5432/wbmonitoring?sslmode=disable"),
 		PriceThreshold:        getEnvFloat("PRICE_THRESHOLD", PriceChangeThreshold),
 		StockThreshold:        getEnvFloat("STOCK_THRESHOLD", StockChangeThreshold),
+		AllowedUserIDs:        []int64{int64(getEnvInt("TELEGRAM_CHAT_ID", 0))},
 	}
 }
 
