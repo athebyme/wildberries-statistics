@@ -27,7 +27,7 @@ services:
         condition: service_healthy
     environment:
       - WB_API_KEY=eyJhbGciOiJFUzI1NiIsImtpZCI6IjIwMjUwMjE3djEiLCJ0eXAiOiJKV1QifQ.eyJlbnQiOjEsImV4cCI6MTc1NjQ2MDEyMSwiaWQiOiIwMTk1NDk1NS1lNjZhLTdhNWYtYThiZS0xYzVlMWEwZjYxZWEiLCJpaWQiOjUzNjU3NjI4LCJvaWQiOjEwODA1MTYsInMiOjEwNzM3NDE5NTAsInNpZCI6IjdhZDQzMTNjLTMzMjItNDkyNi05YTE2LTUxMTc5MmE0MjE1ZSIsInQiOmZhbHNlLCJ1aWQiOjUzNjU3NjI4fQ.-f0OoZ9XYzzaKZsxzSp0X0tyBDLYya8Wpv_tm4y1-gwanfjkTivRKgNsWF_ghLZIwGA_pzJj1V7yRKrE0sP2KA
-      - TELEGRAM_TOKEN=7275211129:AAEn_1RnzqyFQxLD2HFJBWjTY2jVv4kqUUk
+      - TELEGRAM_TOKEN=7536169840:AAH_DD6rmuoe3nN3s5t5islOi6tOvjJRZ78
       - TELEGRAM_CHAT_ID=447590340
       - PG_CONN_STRING=postgres://bananzza:bananzza_monitor@db-first:5432/db_first?sslmode=disable
       - MONITORING_INTERVAL_MIN=10
