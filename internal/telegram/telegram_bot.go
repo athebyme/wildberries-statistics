@@ -2,6 +2,7 @@ package telegram
 
 import (
 	"context"
+	"crypto/tls" // Добавьте импорт crypto/tls
 	"fmt"
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"github.com/jmoiron/sqlx"
@@ -2849,7 +2850,7 @@ func (b *Bot) generatePriceReportPDFToFile(startDate, endDate time.Time, config 
 func (b *Bot) sendEmail(to string, reportType string, period string, filePath string, reportName string) error {
 	// Настройки SMTP сервера (должны быть заданы в конфигурации)
 	smtpHost := os.Getenv("SMTP_HOST")
-	smtpPort := 1025
+	smtpPort := 1025 // или можно брать из переменной окружения, как мы обсуждали ранее, но 1025 для MailHog подходит
 	smtpUser := os.Getenv("SMTP_USER")
 	smtpPassword := os.Getenv("SMTP_PASSWORD")
 
@@ -2875,6 +2876,8 @@ func (b *Bot) sendEmail(to string, reportType string, period string, filePath st
 
 	// Отправляем сообщение
 	d := gomail.NewDialer(smtpHost, smtpPort, smtpUser, smtpPassword)
+	// Явно отключаем TLS, устанавливая TLSConfig в nil
+	d.TLSConfig = &tls.Config{InsecureSkipVerify: true} // Для MailHog в dev InsecureSkipVerify: true допустимо
 	return d.DialAndSend(m)
 }
 
