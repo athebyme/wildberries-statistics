@@ -94,17 +94,14 @@ func getEnvIntSlice(key string, defaultValue []int64) []int64 {
 	strSlice := strings.Split(valueStr, ",")
 	intSlice := make([]int64, 0, len(strSlice))
 	for _, strVal := range strSlice {
-		trimmedVal := strings.TrimSpace(strVal) // Убираем пробелы
-		if trimmedVal == "" {                   // Игнорируем пустые строки после TrimSpace
+		trimmedVal := strings.TrimSpace(strVal)
+		trimmedVal = strings.Trim(trimmedVal, "\"")
+		if trimmedVal == "" {
 			continue
 		}
 		if intVal, err := strconv.ParseInt(trimmedVal, 10, 64); err == nil {
 			intSlice = append(intSlice, intVal)
 		} else {
-			// Логирование ошибки, если не удалось распарсить число
-			// Можно заменить на более подходящий способ обработки ошибок
-			// Например, вернуть ошибку или использовать дефолтное значение для всего слайса
-			// В данном примере, просто пропускаем невалидное значение и логируем.
 			log.Printf("Warning: Could not parse integer value '%s' for key '%s': %v", trimmedVal, key, err)
 		}
 	}
