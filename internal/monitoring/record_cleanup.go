@@ -217,7 +217,7 @@ func (s *RecordCleanupService) processProductStocks(ctx context.Context, product
 func (s *RecordCleanupService) getLastKnownPriceBefore(ctx context.Context, productID int, sizeID int, date time.Time) (*models.PriceRecord, error) {
 	var record models.PriceRecord
 	query := `
-        SELECT * FROM price_records 
+        SELECT * FROM prices
         WHERE product_id = $1 AND size_id = $2 AND recorded_at < $3
         ORDER BY recorded_at DESC
         LIMIT 1
@@ -238,7 +238,7 @@ func (s *RecordCleanupService) getLastKnownPriceBefore(ctx context.Context, prod
 func (s *RecordCleanupService) getLastKnownStockBefore(ctx context.Context, productID int, warehouseID int64, date time.Time) (*models.StockRecord, error) {
 	var record models.StockRecord
 	query := `
-        SELECT * FROM stock_records 
+        SELECT * FROM stocks
         WHERE product_id = $1 AND warehouse_id = $2 AND recorded_at < $3
         ORDER BY recorded_at DESC
         LIMIT 1
@@ -291,7 +291,7 @@ func (s *RecordCleanupService) getAllProducts(ctx context.Context) ([]models.Pro
 // getProductSizes возвращает все размеры товара
 func (s *RecordCleanupService) getProductSizes(ctx context.Context, productID int) ([]int, error) {
 	var sizes []int
-	query := "SELECT DISTINCT size_id FROM price_records WHERE product_id = $1"
+	query := "SELECT DISTINCT size_id FROM prices WHERE product_id = $1"
 
 	err := s.db.SelectContext(ctx, &sizes, query, productID)
 	if err != nil {
@@ -304,7 +304,7 @@ func (s *RecordCleanupService) getProductSizes(ctx context.Context, productID in
 // getProductWarehouses возвращает все склады, на которых есть товар
 func (s *RecordCleanupService) getProductWarehouses(ctx context.Context, productID int) ([]int64, error) {
 	var warehouses []int64
-	query := "SELECT DISTINCT warehouse_id FROM stock_records WHERE product_id = $1"
+	query := "SELECT DISTINCT warehouse_id FROM stocks WHERE product_id = $1"
 
 	err := s.db.SelectContext(ctx, &warehouses, query, productID)
 	if err != nil {
@@ -324,7 +324,7 @@ func (s *RecordCleanupService) getPriceRecordsForHour(
 
 	var records []models.PriceRecord
 	query := `
-        SELECT * FROM price_records 
+        SELECT * FROM prices
         WHERE product_id = $1 AND size_id = $2 AND recorded_at >= $3 AND recorded_at < $4
         ORDER BY recorded_at ASC
     `
@@ -347,7 +347,7 @@ func (s *RecordCleanupService) getStockRecordsForHour(
 
 	var records []models.StockRecord
 	query := `
-        SELECT * FROM stock_records 
+        SELECT * FROM stocks
         WHERE product_id = $1 AND warehouse_id = $2 AND recorded_at >= $3 AND recorded_at < $4
         ORDER BY recorded_at ASC
     `
