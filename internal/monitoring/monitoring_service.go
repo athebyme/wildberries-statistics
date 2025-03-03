@@ -172,6 +172,13 @@ func (m *MonitoringService) RunMonitoring(ctx context.Context) error {
 	// Запускаем сервис очистки записей
 	go m.recordCleanupSvc.RunCleanupProcess(ctx)
 
+	go func() {
+		err := m.UpdateWarehouses(ctx)
+		if err != nil {
+			log.Printf("Error updating Warehouses: %v", err)
+		}
+	}()
+
 	// Запускаем процесс обновления информации о товарах
 	go m.RunProductUpdater(ctx)
 
@@ -196,6 +203,22 @@ func (m *MonitoringService) RunMonitoring(ctx context.Context) error {
 			return ctx.Err()
 		}
 	}
+}
+
+// UpdateWarehouses updates the list of warehouses in the database by fetching from the API.
+func (m *MonitoringService) UpdateWarehouses(ctx context.Context) error {
+	apiKey := m.config.ApiKey // Assuming API key is in config
+	if apiKey == "" {
+		return fmt.Errorf("API key for Wildberries is not configured")
+	}
+
+	err := db.UpdateWarehousesFromAPI(ctx, m.db, m.httpClient, apiKey, m.warehouseLimiter)
+	if err != nil {
+		return fmt.Errorf("failed to update warehouses from API: %w", err)
+	}
+
+	log.Println("Successfully updated warehouses in the database.")
+	return nil
 }
 
 // runDailyReporting запускает процесс отправки ежедневных отчетов

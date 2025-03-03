@@ -5,7 +5,11 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"golang.org/x/time/rate"
+	"net/http"
 	"time"
+	"wbmonitoring/monitoring/internal/api"
+	"wbmonitoring/monitoring/internal/app_errors"
 	"wbmonitoring/monitoring/internal/models"
 
 	"github.com/jmoiron/sqlx"
@@ -98,6 +102,18 @@ CREATE TABLE IF NOT EXISTS hourly_stock_data (
 CREATE INDEX IF NOT EXISTS idx_hourly_price_time ON hourly_price_data(hour_timestamp);
 CREATE INDEX IF NOT EXISTS idx_hourly_stock_time ON hourly_stock_data(hour_timestamp);
 
+
+CREATE TABLE IF NOT EXISTS warehouses(
+    id SERIAL PRIMARY KEY,
+    name TEXT,
+    office_id BIGINT,
+    id BIGINT,
+    cargo_type INTEGER,
+    delivery_type INTEGER,
+);
+
+CREATE INDEX IF NOT EXISTS idx_warehouses_name ON warehouses(name);
+CREATE INDEX IF NOT EXISTS idx_warehouses_id ON warehouses(id);
 `
 
 // InitDB initializes the database schema.
@@ -228,12 +244,73 @@ func UpdateStockCheckStatus(ctx context.Context, db *sqlx.DB, productID int) err
 	return nil
 }
 
-// GetAllWarehouses получает все склады из базы данных
-func GetAllWarehouses(ctx context.Context, db *sqlx.DB) ([]models.Warehouse, error) {
-	warehouses := []models.Warehouse{}
-	err := db.SelectContext(ctx, &warehouses, "SELECT * FROM warehouses")
+// UpdateWarehousesFromAPI fetches warehouses from the Wildberries API and updates the database.
+func UpdateWarehousesFromAPI(ctx context.Context, db *sqlx.DB, client *http.Client, apiKey string, limiter *rate.Limiter) error {
+	warehouses, err := api.GetWarehouses(ctx, client, apiKey, limiter)
 	if err != nil {
-		return nil, fmt.Errorf("fetching warehouses from DB: %w", err)
+		return fmt.Errorf("failed to get warehouses from API: %w", err)
+	}
+
+	tx, err := db.BeginTxx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("failed to start transaction: %w", err)
+	}
+	defer tx.Rollback() // Rollback if function returns before commit
+
+	for _, warehouse := range warehouses {
+		existingWarehouse, err := GetWarehouseByID(ctx, tx, int(warehouse.ID))
+		if err != nil && !errors.Is(err, app_errors.ErrNotFound) {
+			return fmt.Errorf("failed to check if warehouse exists: %w", err)
+		}
+
+		if existingWarehouse == nil {
+			// Warehouse doesn't exist, insert new one
+			_, err = tx.NamedExecContext(ctx, `
+				INSERT INTO warehouses (id, name)
+				VALUES (:id, :name)
+			`, warehouse)
+			if err != nil {
+				return fmt.Errorf("failed to insert new warehouse: %w", err)
+			}
+		} else {
+			// Warehouse exists, update it
+			_, err = tx.NamedExecContext(ctx, `
+				UPDATE warehouses
+				SET name = :name
+				WHERE id = :id
+			`, warehouse)
+			if err != nil {
+				return fmt.Errorf("failed to update warehouse: %w", err)
+			}
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("failed to commit transaction: %w", err)
+	}
+
+	return nil
+}
+
+// GetWarehouseByID retrieves a warehouse by its ID.
+func GetWarehouseByID(ctx context.Context, db sqlx.QueryerContext, id int) (*models.Warehouse, error) {
+	var warehouse models.Warehouse
+	err := sqlx.GetContext(ctx, db, &warehouse, "SELECT id, name FROM warehouses WHERE id = $1", id)
+	if err != nil {
+		if err.Error() == "sql: no rows in result set" {
+			return nil, app_errors.ErrNotFound
+		}
+		return nil, fmt.Errorf("failed to get warehouse by ID: %w", err)
+	}
+	return &warehouse, nil
+}
+
+// GetAllWarehouses retrieves all warehouses from the database.
+func GetAllWarehouses(ctx context.Context, db *sqlx.DB) ([]models.Warehouse, error) {
+	var warehouses []models.Warehouse
+	err := sqlx.SelectContext(ctx, db, &warehouses, "SELECT id, name FROM warehouses")
+	if err != nil {
+		return nil, fmt.Errorf("failed to get all warehouses: %w", err)
 	}
 	return warehouses, nil
 }
