@@ -2,6 +2,7 @@ package telegram
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"github.com/jmoiron/sqlx"
@@ -2875,7 +2876,7 @@ func (b *Bot) sendEmail(to string, reportType string, period string, filePath st
 
 	// Отправляем сообщение
 	d := gomail.NewDialer(smtpHost, smtpPort, smtpUser, smtpPassword)
-	d.TLSConfig = nil
+	d.TLSConfig = &tls.Config{InsecureSkipVerify: true} // Явно отключаем TLS и STARTTLS
 	return d.DialAndSend(m)
 }
 
