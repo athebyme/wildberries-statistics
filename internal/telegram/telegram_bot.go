@@ -53,14 +53,19 @@ func NewBot(token string, chatID int64, db *sqlx.DB, allowedUserIDs []int64, con
 		allowedUsers[userID] = true
 	}
 
-	return &Bot{
+	bot := &Bot{
 		api:          api,
 		chatID:       chatID,
 		db:           db,
 		allowedUsers: allowedUsers,
 		config:       config,
 		userStates:   make(map[int64]string),
-	}, nil
+	}
+	err = bot.Initialize()
+	if err != nil {
+		return nil, err
+	}
+	return bot, nil
 }
 
 // SendTelegramAlert отправляет оповещение в Telegram

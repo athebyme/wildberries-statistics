@@ -39,6 +39,10 @@ services:
       - RETRY_INTERVAL_SEC=5
       - REQUEST_TIMEOUT_SEC=100
       - TELEGRAM_ALLOWED_USER_IDS="447590340"
+      - SMTP_HOST=mailhog  # Имя сервиса MailHog в Docker Compose сети
+      - SMTP_PORT=1025     # Стандартный SMTP порт MailHog
+      - SMTP_USER=""       # MailHog не требует авторизации
+      - SMTP_PASSWORD=""   # MailHog не требует авторизации
 
   # База данных для второго приложения
   db-second:
@@ -79,7 +83,16 @@ services:
       - RETRY_INTERVAL_SEC=5
       - REQUEST_TIMEOUT_SEC=100
       - TELEGRAM_ALLOWED_USER_IDS="5164000485"
-
+      - SMTP_HOST=mailhog  # Имя сервиса MailHog в Docker Compose сети
+      - SMTP_PORT=1025     # Стандартный SMTP порт MailHog
+      - SMTP_USER=""       # MailHog не требует авторизации
+      - SMTP_PASSWORD=""   # MailHog не требует авторизации
+  mailhog:
+    image: mailhog/mailhog:latest
+    ports:
+      - "1025:1025" # SMTP порт
+      - "8025:8025" # Web UI порт
+    container_name: mailhog # Опционально, для удобства
 volumes:
   postgres-first:
   postgres-second:
