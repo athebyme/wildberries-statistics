@@ -771,12 +771,12 @@ func (b *Bot) generatePriceReportExcel(chatID int64, startDate, endDate time.Tim
 		// Добавляем данные в Excel
 		f.SetCellValue(sheetName, fmt.Sprintf("A%d", row), product.Name)
 		f.SetCellValue(sheetName, fmt.Sprintf("B%d", row), product.VendorCode)
-		f.SetCellValue(sheetName, fmt.Sprintf("C%d", row), float64(firstPrice)/100)
-		f.SetCellValue(sheetName, fmt.Sprintf("D%d", row), float64(lastPrice)/100)
-		f.SetCellValue(sheetName, fmt.Sprintf("E%d", row), float64(priceChange)/100)
+		f.SetCellValue(sheetName, fmt.Sprintf("C%d", row), firstPrice)
+		f.SetCellValue(sheetName, fmt.Sprintf("D%d", row), lastPrice)
+		f.SetCellValue(sheetName, fmt.Sprintf("E%d", row), float64(priceChange))
 		f.SetCellValue(sheetName, fmt.Sprintf("F%d", row), priceChangePercent)
-		f.SetCellValue(sheetName, fmt.Sprintf("G%d", row), float64(minPrice)/100)
-		f.SetCellValue(sheetName, fmt.Sprintf("H%d", row), float64(maxPrice)/100)
+		f.SetCellValue(sheetName, fmt.Sprintf("G%d", row), minPrice)
+		f.SetCellValue(sheetName, fmt.Sprintf("H%d", row), maxPrice)
 		f.SetCellValue(sheetName, fmt.Sprintf("I%d", row), len(prices))
 
 		row++
