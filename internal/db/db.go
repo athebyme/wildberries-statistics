@@ -107,12 +107,13 @@ CREATE TABLE IF NOT EXISTS warehouses(
     id SERIAL PRIMARY KEY,
     name TEXT,
     office_id BIGINT,
-    id BIGINT,
+    warehouse_id BIGINT,
     cargo_type INTEGER,
     delivery_type INTEGER
 );
 
 CREATE INDEX IF NOT EXISTS idx_warehouses_name ON warehouses(name);
+CREATE INDEX IF NOT EXISTS idx_warehouses_wid ON warehouses(warehouse_id);
 CREATE INDEX IF NOT EXISTS idx_warehouses_id ON warehouses(id);
 `
 
