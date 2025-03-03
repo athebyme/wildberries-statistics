@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -54,7 +56,7 @@ func LoadConfig() Config {
 		PGConnString:          getEnvString("PG_CONN_STRING", "postgres://bananzza:bananzza_monitor@localhost:5432/wbmonitoring?sslmode=disable"),
 		PriceThreshold:        getEnvFloat("PRICE_THRESHOLD", PriceChangeThreshold),
 		StockThreshold:        getEnvFloat("STOCK_THRESHOLD", StockChangeThreshold),
-		AllowedUserIDs:        []int64{int64(getEnvInt("TELEGRAM_CHAT_ID", 0))},
+		AllowedUserIDs:        getEnvIntSlice("TELEGRAM_ALLOWED_USER_IDS", []int64{}), // Получаем список ID из env
 	}
 }
 
@@ -81,6 +83,32 @@ func getEnvInt(key string, defaultValue int) int {
 	}
 
 	return intValue
+}
+
+func getEnvIntSlice(key string, defaultValue []int64) []int64 {
+	valueStr := os.Getenv(key)
+	if valueStr == "" {
+		return defaultValue
+	}
+
+	strSlice := strings.Split(valueStr, ",")
+	intSlice := make([]int64, 0, len(strSlice))
+	for _, strVal := range strSlice {
+		trimmedVal := strings.TrimSpace(strVal) // Убираем пробелы
+		if trimmedVal == "" {                   // Игнорируем пустые строки после TrimSpace
+			continue
+		}
+		if intVal, err := strconv.ParseInt(trimmedVal, 10, 64); err == nil {
+			intSlice = append(intSlice, intVal)
+		} else {
+			// Логирование ошибки, если не удалось распарсить число
+			// Можно заменить на более подходящий способ обработки ошибок
+			// Например, вернуть ошибку или использовать дефолтное значение для всего слайса
+			// В данном примере, просто пропускаем невалидное значение и логируем.
+			log.Printf("Warning: Could not parse integer value '%s' for key '%s': %v", trimmedVal, key, err)
+		}
+	}
+	return intSlice
 }
 
 func getEnvFloat(key string, defaultValue float64) float64 {
