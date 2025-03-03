@@ -5,7 +5,10 @@ import (
 	"fmt"
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"github.com/jmoiron/sqlx"
+	"github.com/xuri/excelize/v2" // Add this package for Excel file creation
 	"log"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 	"wbmonitoring/monitoring/internal/db"
@@ -130,7 +133,9 @@ func (b *Bot) sendHelpMessage(chatID int64) {
 /report - Получить отчет по ценам или остаткам
 /help - Показать это сообщение
 
-Для получения отчета за период нажмите соответствующую кнопку и выберите интересующий вас период времени.`
+Для получения отчета за период нажмите соответствующую кнопку и выберите интересующий вас период времени.
+
+Отчеты доступны в текстовом формате или в формате Excel. Выберите нужный формат в меню отчета.`
 
 	msg := tgbotapi.NewMessage(chatID, helpText)
 	b.api.Send(msg)
@@ -189,7 +194,15 @@ func (b *Bot) handleCallbackQuery(query *tgbotapi.CallbackQuery) {
 		// Если пришло три параметра, значит это запрос отчета за период
 		if len(parts) == 3 {
 			period := parts[2]
-			b.generateReport(query.Message.Chat.ID, reportType, period)
+			b.sendFormatSelection(query.Message.Chat.ID, reportType, period)
+			return
+		}
+
+		// Если пришло четыре параметра, значит это запрос отчета в определенном формате
+		if len(parts) == 4 {
+			period := parts[2]
+			format := parts[3]
+			b.generateReport(query.Message.Chat.ID, reportType, period, format)
 			return
 		}
 	}
@@ -222,8 +235,26 @@ func (b *Bot) sendPeriodSelection(chatID int64, reportType string) {
 	b.api.Send(msg)
 }
 
+// sendFormatSelection отправляет меню выбора формата отчета
+func (b *Bot) sendFormatSelection(chatID int64, reportType, period string) {
+	msgText := "Выберите формат отчета:"
+
+	msg := tgbotapi.NewMessage(chatID, msgText)
+
+	// Создаем inline клавиатуру с форматами
+	keyboard := tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("Текстовый", fmt.Sprintf("report_%s_%s_text", reportType, period)),
+			tgbotapi.NewInlineKeyboardButtonData("Excel", fmt.Sprintf("report_%s_%s_excel", reportType, period)),
+		),
+	)
+
+	msg.ReplyMarkup = keyboard
+	b.api.Send(msg)
+}
+
 // generateReport генерирует и отправляет отчет за выбранный период
-func (b *Bot) generateReport(chatID int64, reportType, period string) {
+func (b *Bot) generateReport(chatID int64, reportType, period, format string) {
 	// Отправляем сообщение о начале генерации отчета
 	statusMsg, _ := b.api.Send(tgbotapi.NewMessage(chatID, "Генерация отчета... Пожалуйста, подождите."))
 
@@ -250,11 +281,23 @@ func (b *Bot) generateReport(chatID int64, reportType, period string) {
 		return
 	}
 
-	// Генерируем отчет в зависимости от типа
+	// Генерируем отчет в зависимости от типа и формата
 	if reportType == "prices" {
-		b.generatePriceReport(chatID, startDate, endDate)
+		if format == "text" {
+			b.generatePriceReport(chatID, startDate, endDate)
+		} else if format == "excel" {
+			b.generatePriceReportExcel(chatID, startDate, endDate)
+		} else {
+			b.api.Send(tgbotapi.NewMessage(chatID, "Неизвестный формат отчета. Пожалуйста, выберите корректный формат."))
+		}
 	} else if reportType == "stocks" {
-		b.generateStockReport(chatID, startDate, endDate)
+		if format == "text" {
+			b.generateStockReport(chatID, startDate, endDate)
+		} else if format == "excel" {
+			b.generateStockReportExcel(chatID, startDate, endDate)
+		} else {
+			b.api.Send(tgbotapi.NewMessage(chatID, "Неизвестный формат отчета. Пожалуйста, выберите корректный формат."))
+		}
 	} else {
 		b.api.Send(tgbotapi.NewMessage(chatID, "Неизвестный тип отчета. Пожалуйста, выберите корректный тип."))
 	}
@@ -264,7 +307,7 @@ func (b *Bot) generateReport(chatID int64, reportType, period string) {
 	b.api.Request(deleteMsg)
 }
 
-// generatePriceReport генерирует отчет по ценам
+// generatePriceReport генерирует отчет по ценам в текстовом формате
 func (b *Bot) generatePriceReport(chatID int64, startDate, endDate time.Time) {
 	ctx := context.Background()
 
@@ -315,14 +358,17 @@ func (b *Bot) generatePriceReport(chatID int64, startDate, endDate time.Time) {
 
 		// Рассчитываем изменение цены за период
 		priceChange := lastPrice - firstPrice
-		priceChangePercent := (priceChange / firstPrice) * 100
+		priceChangePercent := float64(0)
+		if firstPrice > 0 {
+			priceChangePercent = float64(priceChange) / float64(firstPrice) * 100
+		}
 
 		// Добавляем информацию о товаре в отчет
 		reportText += fmt.Sprintf("Товар: %s (арт. %s)\n", product.Name, product.VendorCode)
-		reportText += fmt.Sprintf("Начальная цена: %.2f₽\n", firstPrice)
-		reportText += fmt.Sprintf("Конечная цена: %.2f₽\n", lastPrice)
-		reportText += fmt.Sprintf("Изменение: %.2f₽ (%.2f%%)\n", priceChange, priceChangePercent)
-		reportText += fmt.Sprintf("Мин. цена: %.2f₽, Макс. цена: %.2f₽\n", minPrice, maxPrice)
+		reportText += fmt.Sprintf("Начальная цена: %.2f₽\n", float64(firstPrice)/100)
+		reportText += fmt.Sprintf("Конечная цена: %.2f₽\n", float64(lastPrice)/100)
+		reportText += fmt.Sprintf("Изменение: %.2f₽ (%.2f%%)\n", float64(priceChange)/100, priceChangePercent)
+		reportText += fmt.Sprintf("Мин. цена: %.2f₽, Макс. цена: %.2f₽\n", float64(minPrice)/100, float64(maxPrice)/100)
 		reportText += fmt.Sprintf("Количество записей: %d\n\n", len(prices))
 	}
 
@@ -342,7 +388,144 @@ func (b *Bot) generatePriceReport(chatID int64, startDate, endDate time.Time) {
 	}
 }
 
-// generateStockReport генерирует отчет по остаткам
+// generatePriceReportExcel генерирует отчет по ценам в формате Excel
+func (b *Bot) generatePriceReportExcel(chatID int64, startDate, endDate time.Time) {
+	ctx := context.Background()
+
+	// Получаем все товары
+	products, err := db.GetAllProducts(ctx, b.db)
+	if err != nil {
+		b.api.Send(tgbotapi.NewMessage(chatID, fmt.Sprintf("Ошибка при получении списка товаров: %v", err)))
+		return
+	}
+
+	if len(products) == 0 {
+		b.api.Send(tgbotapi.NewMessage(chatID, "Товары не найдены в базе данных."))
+		return
+	}
+
+	// Создаем новый Excel файл
+	f := excelize.NewFile()
+	sheetName := "Отчет по ценам"
+	f.SetSheetName("Sheet1", sheetName)
+
+	// Устанавливаем заголовки
+	headers := []string{
+		"Товар", "Артикул", "Начальная цена (₽)", "Конечная цена (₽)",
+		"Изменение (₽)", "Изменение (%)", "Мин. цена (₽)", "Макс. цена (₽)", "Количество записей",
+	}
+	for i, header := range headers {
+		cell := fmt.Sprintf("%c%d", 'A'+i, 1)
+		f.SetCellValue(sheetName, cell, header)
+	}
+
+	// Устанавливаем стиль для заголовков
+	headerStyle, _ := f.NewStyle(&excelize.Style{
+		Font:      &excelize.Font{Bold: true},
+		Fill:      excelize.Fill{Type: "pattern", Color: []string{"#DDEBF7"}, Pattern: 1},
+		Alignment: &excelize.Alignment{Horizontal: "center"},
+		Border: []excelize.Border{
+			{Type: "top", Color: "#000000", Style: 1},
+			{Type: "left", Color: "#000000", Style: 1},
+			{Type: "right", Color: "#000000", Style: 1},
+			{Type: "bottom", Color: "#000000", Style: 1},
+		},
+	})
+	f.SetCellStyle(sheetName, "A1", string(rune('A'+len(headers)-1))+"1", headerStyle)
+
+	// Заполняем данные
+	row := 2
+	for _, product := range products {
+		// Получаем историю цен для товара за период
+		prices, err := db.GetPricesForPeriod(ctx, b.db, product.ID, startDate, endDate)
+		if err != nil {
+			log.Printf("Error getting prices for product %d: %v", product.ID, err)
+			continue
+		}
+
+		if len(prices) == 0 {
+			continue
+		}
+
+		// Находим максимальную и минимальную цену за период
+		var minPrice, maxPrice, firstPrice, lastPrice int
+		firstPrice = prices[0].FinalPrice
+		lastPrice = prices[len(prices)-1].FinalPrice
+		minPrice = firstPrice
+		maxPrice = firstPrice
+
+		for _, price := range prices {
+			if price.FinalPrice < minPrice {
+				minPrice = price.FinalPrice
+			}
+			if price.FinalPrice > maxPrice {
+				maxPrice = price.FinalPrice
+			}
+		}
+
+		// Рассчитываем изменение цены за период
+		priceChange := lastPrice - firstPrice
+		priceChangePercent := float64(0)
+		if firstPrice > 0 {
+			priceChangePercent = float64(priceChange) / float64(firstPrice) * 100
+		}
+
+		// Добавляем данные в Excel
+		f.SetCellValue(sheetName, fmt.Sprintf("A%d", row), product.Name)
+		f.SetCellValue(sheetName, fmt.Sprintf("B%d", row), product.VendorCode)
+		f.SetCellValue(sheetName, fmt.Sprintf("C%d", row), float64(firstPrice)/100)
+		f.SetCellValue(sheetName, fmt.Sprintf("D%d", row), float64(lastPrice)/100)
+		f.SetCellValue(sheetName, fmt.Sprintf("E%d", row), float64(priceChange)/100)
+		f.SetCellValue(sheetName, fmt.Sprintf("F%d", row), priceChangePercent)
+		f.SetCellValue(sheetName, fmt.Sprintf("G%d", row), float64(minPrice)/100)
+		f.SetCellValue(sheetName, fmt.Sprintf("H%d", row), float64(maxPrice)/100)
+		f.SetCellValue(sheetName, fmt.Sprintf("I%d", row), len(prices))
+
+		row++
+	}
+
+	// Автонастройка ширины столбцов
+	for i := range headers {
+		col := string(rune('A' + i))
+		width, _ := f.GetColWidth(sheetName, col)
+		if width < 15 {
+			f.SetColWidth(sheetName, col, col, 15)
+		}
+	}
+
+	// Устанавливаем стиль для чисел
+	numberStyle, _ := f.NewStyle(&excelize.Style{
+		NumFmt: 2, // Формат с двумя десятичными знаками
+	})
+	f.SetCellStyle(sheetName, "C2", fmt.Sprintf("H%d", row-1), numberStyle)
+
+	// Сохраняем файл
+	filename := fmt.Sprintf("price_report_%s_%s.xlsx",
+		startDate.Format("02-01-2006"),
+		endDate.Format("02-01-2006"))
+	filepath := filepath.Join(os.TempDir(), filename)
+	if err := f.SaveAs(filepath); err != nil {
+		log.Printf("Error saving Excel file: %v", err)
+		b.api.Send(tgbotapi.NewMessage(chatID, "Ошибка при создании Excel-файла."))
+		return
+	}
+
+	// Отправляем файл в Telegram
+	doc := tgbotapi.NewDocument(chatID, tgbotapi.FilePath(filepath))
+	doc.Caption = fmt.Sprintf("📈 Отчет по ценам за период %s - %s",
+		startDate.Format("02.01.2006"),
+		endDate.Format("02.01.2006"))
+	_, err = b.api.Send(doc)
+	if err != nil {
+		log.Printf("Error sending Excel file: %v", err)
+		b.api.Send(tgbotapi.NewMessage(chatID, "Ошибка при отправке Excel-файла."))
+	}
+
+	// Удаляем временный файл
+	os.Remove(filepath)
+}
+
+// generateStockReport генерирует отчет по остаткам в текстовом формате
 func (b *Bot) generateStockReport(chatID int64, startDate, endDate time.Time) {
 	ctx := context.Background()
 
@@ -448,51 +631,101 @@ func (b *Bot) generateStockReport(chatID int64, startDate, endDate time.Time) {
 	}
 }
 
-// SendDailyReport отправляет ежедневный отчет по всем товарам
-func (b *Bot) SendDailyReport(ctx context.Context) error {
-	now := time.Now()
-	yesterday := now.AddDate(0, 0, -1)
-
-	// Устанавливаем даты для вчерашнего дня
-	startDate := time.Date(yesterday.Year(), yesterday.Month(), yesterday.Day(), 0, 0, 0, 0, now.Location())
-	endDate := time.Date(yesterday.Year(), yesterday.Month(), yesterday.Day(), 23, 59, 59, 0, now.Location())
-
-	// Формируем отчет по ценам
-	message := fmt.Sprintf("📊 Ежедневный отчет за %s\n\n", yesterday.Format("02.01.2006"))
+// generateStockReportExcel генерирует отчет по остаткам в формате Excel
+// generateStockReportExcel генерирует отчет по остаткам в формате Excel
+func (b *Bot) generateStockReportExcel(chatID int64, startDate, endDate time.Time) {
+	ctx := context.Background()
 
 	// Получаем все товары
 	products, err := db.GetAllProducts(ctx, b.db)
 	if err != nil {
-		return fmt.Errorf("getting products for daily report: %w", err)
+		b.api.Send(tgbotapi.NewMessage(chatID, fmt.Sprintf("Ошибка при получении списка товаров: %v", err)))
+		return
 	}
 
-	// Формируем краткий отчет по ценам
-	priceChanges := 0
-	for _, product := range products {
-		prices, err := db.GetPricesForPeriod(ctx, b.db, product.ID, startDate, endDate)
-		if err != nil {
-			log.Printf("Error getting prices for product %d: %v", product.ID, err)
-			continue
-		}
-
-		if len(prices) <= 1 {
-			continue
-		}
-
-		// Если было больше одной записи о цене, значит были изменения
-		priceChanges++
+	if len(products) == 0 {
+		b.api.Send(tgbotapi.NewMessage(chatID, "Товары не найдены в базе данных."))
+		return
 	}
 
-	// Формируем краткий отчет по остаткам
-	stockChanges := 0
+	// Получаем все склады
+	warehouses, err := db.GetAllWarehouses(ctx, b.db)
+	if err != nil {
+		b.api.Send(tgbotapi.NewMessage(chatID, fmt.Sprintf("Ошибка при получении списка складов: %v", err)))
+		return
+	}
+
+	// Создаем новый Excel файл
+	f := excelize.NewFile()
+	sheetName := "Отчет по остаткам"
+	f.SetSheetName("Sheet1", sheetName)
+
+	// Устанавливаем заголовки для суммарного отчета
+	headers := []string{
+		"Товар", "Артикул", "Начальный остаток (шт.)", "Конечный остаток (шт.)",
+		"Изменение (шт.)", "Изменение (%)", "Мин. остаток (шт.)", "Макс. остаток (шт.)", "Количество записей",
+	}
+	for i, header := range headers {
+		cell := fmt.Sprintf("%c%d", 'A'+i, 1)
+		f.SetCellValue(sheetName, cell, header)
+	}
+
+	// Устанавливаем стиль для заголовков
+	headerStyle, _ := f.NewStyle(&excelize.Style{
+		Font:      &excelize.Font{Bold: true},
+		Fill:      excelize.Fill{Type: "pattern", Color: []string{"#DDEBF7"}, Pattern: 1},
+		Alignment: &excelize.Alignment{Horizontal: "center"},
+		Border: []excelize.Border{
+			{Type: "top", Color: "#000000", Style: 1},
+			{Type: "left", Color: "#000000", Style: 1},
+			{Type: "right", Color: "#000000", Style: 1},
+			{Type: "bottom", Color: "#000000", Style: 1},
+		},
+	})
+	f.SetCellStyle(sheetName, "A1", string(rune('A'+len(headers)-1))+"1", headerStyle)
+
+	// Создаем отдельный лист для подробной информации по складам
+	detailSheetName := "Детализация по складам"
+	index, err := f.NewSheet(detailSheetName)
+	if err != nil {
+		log.Printf("Error creating detail sheet: %v", err)
+	}
+
+	// Устанавливаем заголовки для детального отчета
+	detailHeaders := []string{
+		"Товар", "Артикул", "Склад", "Начальный остаток (шт.)", "Конечный остаток (шт.)",
+		"Изменение (шт.)", "Изменение (%)", "Мин. остаток (шт.)", "Макс. остаток (шт.)", "Количество записей",
+	}
+	for i, header := range detailHeaders {
+		cell := fmt.Sprintf("%c%d", 'A'+i, 1)
+		f.SetCellValue(detailSheetName, cell, header)
+	}
+	f.SetCellStyle(detailSheetName, "A1", string(rune('A'+len(detailHeaders)-1))+"1", headerStyle)
+
+	// Заполняем данные
+	row := 2
+	detailRow := 2
+
 	for _, product := range products {
-		warehouses, err := db.GetAllWarehouses(ctx, b.db)
-		if err != nil {
-			log.Printf("Error getting warehouses: %v", err)
-			continue
-		}
+		totalFirstStock := 0
+		totalLastStock := 0
+		totalMinStock := 0
+		totalMaxStock := 0
+		totalRecords := 0
+		hasStocks := false
+
+		// Для каждого продукта собираем данные по каждому складу
+		warehouseData := []struct {
+			warehouseName string
+			firstStock    int
+			lastStock     int
+			minStock      int
+			maxStock      int
+			records       int
+		}{}
 
 		for _, warehouse := range warehouses {
+			// Получаем историю остатков для товара на конкретном складе за период
 			stocks, err := db.GetStocksForPeriod(ctx, b.db, product.ID, warehouse.ID, startDate, endDate)
 			if err != nil {
 				log.Printf("Error getting stocks for product %d on warehouse %d: %v",
@@ -500,23 +733,161 @@ func (b *Bot) SendDailyReport(ctx context.Context) error {
 				continue
 			}
 
-			if len(stocks) <= 1 {
+			if len(stocks) == 0 {
 				continue
 			}
 
-			// Если было больше одной записи об остатках, значит были изменения
-			stockChanges++
-			break
+			hasStocks = true
+
+			// Первый и последний остаток за период
+			firstStock := stocks[0].Amount
+			lastStock := stocks[len(stocks)-1].Amount
+
+			// Находим максимальный и минимальный остаток за период
+			minStock := firstStock
+			maxStock := firstStock
+
+			for _, stock := range stocks {
+				if stock.Amount < minStock {
+					minStock = stock.Amount
+				}
+				if stock.Amount > maxStock {
+					maxStock = stock.Amount
+				}
+			}
+
+			// Суммируем для общего отчета
+			totalFirstStock += firstStock
+			totalLastStock += lastStock
+			if totalMinStock == 0 || minStock < totalMinStock {
+				totalMinStock = minStock
+			}
+			if maxStock > totalMaxStock {
+				totalMaxStock = maxStock
+			}
+			totalRecords += len(stocks)
+
+			// Добавляем данные в детальный лист
+			f.SetCellValue(detailSheetName, fmt.Sprintf("A%d", detailRow), product.Name)
+			f.SetCellValue(detailSheetName, fmt.Sprintf("B%d", detailRow), product.VendorCode)
+			f.SetCellValue(detailSheetName, fmt.Sprintf("C%d", detailRow), warehouse.Name)
+			f.SetCellValue(detailSheetName, fmt.Sprintf("D%d", detailRow), firstStock)
+			f.SetCellValue(detailSheetName, fmt.Sprintf("E%d", detailRow), lastStock)
+			f.SetCellValue(detailSheetName, fmt.Sprintf("F%d", detailRow), lastStock-firstStock)
+
+			// Рассчитываем процент изменения
+			changePercent := float64(0)
+			if firstStock > 0 {
+				changePercent = float64(lastStock-firstStock) / float64(firstStock) * 100
+			}
+			f.SetCellValue(detailSheetName, fmt.Sprintf("G%d", detailRow), changePercent)
+
+			f.SetCellValue(detailSheetName, fmt.Sprintf("H%d", detailRow), minStock)
+			f.SetCellValue(detailSheetName, fmt.Sprintf("I%d", detailRow), maxStock)
+			f.SetCellValue(detailSheetName, fmt.Sprintf("J%d", detailRow), len(stocks))
+
+			detailRow++
+
+			// Сохраняем данные для сводного отчета
+			warehouseData = append(warehouseData, struct {
+				warehouseName string
+				firstStock    int
+				lastStock     int
+				minStock      int
+				maxStock      int
+				records       int
+			}{
+				warehouseName: warehouse.Name,
+				firstStock:    firstStock,
+				lastStock:     lastStock,
+				minStock:      minStock,
+				maxStock:      maxStock,
+				records:       len(stocks),
+			})
+		}
+
+		if hasStocks {
+			// Добавляем данные в суммарный лист
+			f.SetCellValue(sheetName, fmt.Sprintf("A%d", row), product.Name)
+			f.SetCellValue(sheetName, fmt.Sprintf("B%d", row), product.VendorCode)
+			f.SetCellValue(sheetName, fmt.Sprintf("C%d", row), totalFirstStock)
+			f.SetCellValue(sheetName, fmt.Sprintf("D%d", row), totalLastStock)
+			f.SetCellValue(sheetName, fmt.Sprintf("E%d", row), totalLastStock-totalFirstStock)
+
+			// Рассчитываем процент изменения
+			changePercent := float64(0)
+			if totalFirstStock > 0 {
+				changePercent = float64(totalLastStock-totalFirstStock) / float64(totalFirstStock) * 100
+			}
+			f.SetCellValue(sheetName, fmt.Sprintf("F%d", row), changePercent)
+
+			f.SetCellValue(sheetName, fmt.Sprintf("G%d", row), totalMinStock)
+			f.SetCellValue(sheetName, fmt.Sprintf("H%d", row), totalMaxStock)
+			f.SetCellValue(sheetName, fmt.Sprintf("I%d", row), totalRecords)
+
+			row++
 		}
 	}
 
-	message += fmt.Sprintf("Всего товаров: %d\n", len(products))
-	message += fmt.Sprintf("Товаров с изменением цен: %d\n", priceChanges)
-	message += fmt.Sprintf("Товаров с изменением остатков: %d\n\n", stockChanges)
+	// Автонастройка ширины столбцов для суммарного отчета
+	for i := range headers {
+		col := string(rune('A' + i))
+		width, _ := f.GetColWidth(sheetName, col)
+		if width < 15 {
+			f.SetColWidth(sheetName, col, col, 15)
+		}
+	}
 
-	message += "Для получения подробного отчета используйте команду /report или кнопку 'Получить отчет'."
+	// Автонастройка ширины столбцов для детального отчета
+	for i := range detailHeaders {
+		col := string(rune('A' + i))
+		width, _ := f.GetColWidth(detailSheetName, col)
+		if width < 15 {
+			f.SetColWidth(detailSheetName, col, col, 15)
+		}
+	}
 
-	return b.SendTelegramAlert(message)
+	// Устанавливаем стиль для чисел
+	numberStyle, _ := f.NewStyle(&excelize.Style{
+		NumFmt: 1, // Целое число
+	})
+	f.SetCellStyle(sheetName, "C2", fmt.Sprintf("E%d", row-1), numberStyle)
+	f.SetCellStyle(sheetName, "G2", fmt.Sprintf("I%d", row-1), numberStyle)
+	f.SetCellStyle(detailSheetName, "D2", fmt.Sprintf("F%d", detailRow-1), numberStyle)
+	f.SetCellStyle(detailSheetName, "H2", fmt.Sprintf("J%d", detailRow-1), numberStyle)
+
+	// Устанавливаем стиль для процентов
+	percentStyle, _ := f.NewStyle(&excelize.Style{
+		NumFmt: 10, // Процентный формат
+	})
+	f.SetCellStyle(sheetName, "F2", fmt.Sprintf("F%d", row-1), percentStyle)
+	f.SetCellStyle(detailSheetName, "G2", fmt.Sprintf("G%d", detailRow-1), percentStyle)
+
+	// Устанавливаем активный лист
+	f.SetActiveSheet(index)
+
+	// Сохраняем файл
+	filename := fmt.Sprintf("stock_report_%s_%s.xlsx",
+		startDate.Format("02-01-2006"),
+		endDate.Format("02-01-2006"))
+	filepath := filepath.Join(os.TempDir(), filename)
+	if err := f.SaveAs(filepath); err != nil {
+		log.Printf("Error saving Excel file: %v", err)
+		b.api.Send(tgbotapi.NewMessage(chatID, "Ошибка при создании Excel-файла."))
+		return
+	}
+
+	// Отправляем файл в Telegram
+	doc := tgbotapi.NewDocument(chatID, tgbotapi.FilePath(filepath))
+	doc.Caption = fmt.Sprintf("📦 Отчет по остаткам за период %s - %s",
+		startDate.Format("02.01.2006"),
+		endDate.Format("02.01.2006"))
+	_, err = b.api.Send(doc)
+	if err != nil {
+		log.Printf("Error sending Excel file: %v", err)
+		b.api.Send(tgbotapi.NewMessage(chatID, "Ошибка при отправке Excel-файла."))
+	}
+
+	// Удаляем временный файл
+	os.Remove(filepath)
 }
-
-// Вспомогательные функции для работы с базой данных
