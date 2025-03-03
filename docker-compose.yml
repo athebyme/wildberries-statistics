@@ -38,7 +38,7 @@ services:
       - MAX_RETRIES=3
       - RETRY_INTERVAL_SEC=5
       - REQUEST_TIMEOUT_SEC=100
-      - TELEGRAM_ALLOWED_USERS="447590340"
+      - TELEGRAM_ALLOWED_USER_IDS="447590340"
 
   # База данных для второго приложения
   db-second:
@@ -78,7 +78,7 @@ services:
       - MAX_RETRIES=3
       - RETRY_INTERVAL_SEC=5
       - REQUEST_TIMEOUT_SEC=100
-      - TELEGRAM_ALLOWED_USERS="5164000485"
+      - TELEGRAM_ALLOWED_USER_IDS="5164000485"
 
 volumes:
   postgres-first:
