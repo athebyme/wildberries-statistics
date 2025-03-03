@@ -16,7 +16,7 @@ const (
 	RetryInterval        = 2 * time.Second
 	RequestTimeout       = 100 * time.Second
 	MonitoringInterval   = 10 * time.Minute
-	PriceChangeThreshold = 20  // процент изменения цены для уведомления
+	PriceChangeThreshold = 10  // процент изменения цены для уведомления
 	StockChangeThreshold = 100 // процент изменения количества для уведомления
 
 	ProductUpdateInterval = 5 * time.Hour // Интервал обновления продуктов

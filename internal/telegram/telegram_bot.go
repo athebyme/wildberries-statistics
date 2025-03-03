@@ -369,7 +369,7 @@ func addDynamicChangesSheet(
 				priceChange := price.FinalPrice - prevPrice
 				changePercent := 0.0
 				if prevPrice > 0 {
-					changePercent = float64(priceChange) / float64(prevPrice) * 100
+					changePercent = float64((priceChange / prevPrice) * 100)
 				}
 
 				// Добавляем только если есть изменение цены
@@ -387,7 +387,7 @@ func addDynamicChangesSheet(
 					}
 
 					f.SetCellValue(sheetName, fmt.Sprintf("C%d", row), price.RecordedAt.Format("02.01.2006 15:04"))
-					f.SetCellValue(sheetName, fmt.Sprintf("D%d", row), float64(price.FinalPrice)/100)
+					f.SetCellValue(sheetName, fmt.Sprintf("D%d", row), price.FinalPrice)
 					f.SetCellValue(sheetName, fmt.Sprintf("E%d", row), float64(priceChange)/100)
 					f.SetCellValue(sheetName, fmt.Sprintf("F%d", row), changePercent)
 
