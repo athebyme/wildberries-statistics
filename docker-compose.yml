@@ -1,43 +1,85 @@
 version: '3.8'
-
 services:
-  db:
+  # База данных для первого приложения
+  db-first:
     image: postgres:15-alpine
     restart: always
     environment:
       POSTGRES_USER: bananzza
       POSTGRES_PASSWORD: bananzza_monitor
-      POSTGRES_DB: wbmonitoring
+      POSTGRES_DB: db_first
     volumes:
-      - postgres-data:/var/lib/postgresql/data
+      - postgres-first:/var/lib/postgresql/data
     ports:
       - "5432:5432"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U wbuser -d wbmonitoring"]
+      test: ["CMD-SHELL", "pg_isready -U bananzza -d db_first"]
       interval: 10s
       timeout: 5s
       retries: 5
 
-  wb-monitoring:
+  # Первое приложение с индивидуальными переменными окружения
+  wb-monitoring-first:
     build: .
     restart: always
     depends_on:
-      db:
+      db-first:
         condition: service_healthy
     environment:
-      - WB_API_KEY=eyJhbGciOiJFUzI1NiIsImtpZCI6IjIwMjUwMjE3djEiLCJ0eXAiOiJKV1QifQ.eyJlbnQiOjEsImV4cCI6MTc1NjQzNDY5NiwiaWQiOiIwMTk1NDdkMS1mMjQwLTdjYWItOWE0MS03NzYyZjk2NTExYzkiLCJpaWQiOjUzNjU3NjI4LCJvaWQiOjEwODA1MTYsInMiOjc5MzQsInNpZCI6IjdhZDQzMTNjLTMzMjItNDkyNi05YTE2LTUxMTc5MmE0MjE1ZSIsInQiOmZhbHNlLCJ1aWQiOjUzNjU3NjI4fQ.Fao2iueUE2bTK0kpaJu6WOE6hFm3L3iEll8MhsYvWLCXD0LKOr44zf8F5x4Daq_RAQcb7ImTNSstIxubws_kug
-      - TELEGRAM_TOKEN=7536169840:AAH_DD6rmuoe3nN3s5t5islOi6tOvjJRZ78
+      - WB_API_KEY=eyJhbGciOiJFUzI1NiIsImtpZCI6IjIwMjUwMjE3djEiLCJ0eXAiOiJKV1QifQ.eyJlbnQiOjEsImV4cCI6MTc1NjQ2MDEyMSwiaWQiOiIwMTk1NDk1NS1lNjZhLTdhNWYtYThiZS0xYzVlMWEwZjYxZWEiLCJpaWQiOjUzNjU3NjI4LCJvaWQiOjEwODA1MTYsInMiOjEwNzM3NDE5NTAsInNpZCI6IjdhZDQzMTNjLTMzMjItNDkyNi05YTE2LTUxMTc5MmE0MjE1ZSIsInQiOmZhbHNlLCJ1aWQiOjUzNjU3NjI4fQ.-f0OoZ9XYzzaKZsxzSp0X0tyBDLYya8Wpv_tm4y1-gwanfjkTivRKgNsWF_ghLZIwGA_pzJj1V7yRKrE0sP2KA
+      - TELEGRAM_TOKEN=7275211129:AAEn_1RnzqyFQxLD2HFJBWjTY2jVv4kqUUk
       - TELEGRAM_CHAT_ID=447590340
-      - PG_CONN_STRING=postgres://bananzza:bananzza_monitor@db:5432/wbmonitoring?sslmode=disable
-      - MONITORING_INTERVAL_MIN=5
-      - PRODUCT_UPDATE_INTERVAL_HOUR=5
-      - PRICE_THRESHOLD=30
-      - STOCK_THRESHOLD=50
+      - PG_CONN_STRING=postgres://bananzza:bananzza_monitor@db-first:5432/db_first?sslmode=disable
+      - MONITORING_INTERVAL_MIN=10
+      - PRODUCT_UPDATE_INTERVAL_HOUR=12
+      - PRICE_THRESHOLD=10
+      - STOCK_THRESHOLD=100
       - WORKER_COUNT=5
       - MAX_RETRIES=3
       - RETRY_INTERVAL_SEC=5
       - REQUEST_TIMEOUT_SEC=100
-      - TELEGRAM_ALLOWED_USER_IDS=""
+      - TELEGRAM_ALLOWED_USERS="447590340"
+
+  # База данных для второго приложения
+  db-second:
+    image: postgres:15-alpine
+    restart: always
+    environment:
+      POSTGRES_USER: lasciva
+      POSTGRES_PASSWORD: lasciva
+      POSTGRES_DB: db_second
+    volumes:
+      - postgres-second:/var/lib/postgresql/data
+    ports:
+      - "5433:5432"  # Исправлено: внешний порт 5433 -> внутренний порт 5432
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lasciva -d db_second"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Второе приложение со своими переменными окружения
+  wb-monitoring-second:
+    build: .
+    restart: always
+    depends_on:
+      db-second:
+        condition: service_healthy
+    environment:
+      - WB_API_KEY=eyJhbGciOiJFUzI1NiIsImtpZCI6IjIwMjUwMjE3djEiLCJ0eXAiOiJKV1QifQ.eyJlbnQiOjEsImV4cCI6MTc1NjQ2MDA3OCwiaWQiOiIwMTk1NDk1NS0zZGM4LTdlMjUtYTY2Zi04YjIzOGRhMWUxYzUiLCJpaWQiOjYzNjcwMTI1LCJvaWQiOjQ0NTI5NCwicyI6MTA3Mzc0MTk1MCwic2lkIjoiNTJkZWRlZDUtYmU0OC00MjBiLTlmODYtZjFmZjcwMmZkZjY1IiwidCI6ZmFsc2UsInVpZCI6NjM2NzAxMjV9.WQjgR7lNOomxSbrSsUwBi0HN6jABVZwtwmdE2gMZYMe98E1JM29sCQQj2RM2a7PobnNbiKSG7c6gWrjZ8ceyDg
+      - TELEGRAM_TOKEN=7275211129:AAEn_1RnzqyFQxLD2HFJBWjTY2jVv4kqUUk
+      - TELEGRAM_CHAT_ID=5164000485
+      - PG_CONN_STRING=postgres://lasciva:lasciva@db-second:5432/db_second?sslmode=disable
+      - MONITORING_INTERVAL_MIN=10
+      - PRODUCT_UPDATE_INTERVAL_HOUR=5
+      - PRICE_THRESHOLD=10
+      - STOCK_THRESHOLD=100
+      - WORKER_COUNT=5
+      - MAX_RETRIES=3
+      - RETRY_INTERVAL_SEC=5
+      - REQUEST_TIMEOUT_SEC=100
+      - TELEGRAM_ALLOWED_USERS="5164000485"
 
 volumes:
-  postgres-data:
+  postgres-first:
+  postgres-second:

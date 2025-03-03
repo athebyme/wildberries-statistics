@@ -41,7 +41,7 @@ func NewMonitoringService(cfg config.Config) (*MonitoringService, error) {
 	if err != nil {
 		return nil, fmt.Errorf("connecting to database: %w", err)
 	}
-
+	log.Printf("allowed users %v", cfg.AllowedUserIDs)
 	telegramBot, err := telegram.NewBot(
 		cfg.TelegramToken,
 		cfg.TelegramChatID,

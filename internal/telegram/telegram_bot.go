@@ -36,6 +36,7 @@ type ReportConfig struct {
 
 // NewBot создает нового Telegram бота
 func NewBot(token string, chatID int64, db *sqlx.DB, allowedUserIDs []int64, config ReportConfig) (*Bot, error) {
+	log.Printf("allowed users %v", allowedUserIDs)
 	api, err := tgbotapi.NewBotAPI(token)
 	if err != nil {
 		return nil, fmt.Errorf("initializing telegram bot: %w", err)
