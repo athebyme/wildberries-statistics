@@ -2849,7 +2849,7 @@ func (b *Bot) generatePriceReportPDFToFile(startDate, endDate time.Time, config 
 func (b *Bot) sendEmail(to string, reportType string, period string, filePath string, reportName string) error {
 	// Настройки SMTP сервера (должны быть заданы в конфигурации)
 	smtpHost := os.Getenv("SMTP_HOST")
-	smtpPort := 587 // или из конфигурации
+	smtpPort := 1025
 	smtpUser := os.Getenv("SMTP_USER")
 	smtpPassword := os.Getenv("SMTP_PASSWORD")
 
