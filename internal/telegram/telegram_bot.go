@@ -821,6 +821,14 @@ func addDynamicChangesSheet(
 func (b *Bot) generateReport(chatID int64, reportType, period, format string) {
 	// Отправляем сообщение о начале генерации отчета
 	statusMsg, _ := b.api.Send(tgbotapi.NewMessage(chatID, "Генерация отчета... Пожалуйста, подождите."))
+	defer func() {
+		// Удаляем сообщение о генерации отчета после завершения или ошибки
+		deleteMsg := tgbotapi.NewDeleteMessage(chatID, statusMsg.MessageID)
+		_, err := b.api.Request(deleteMsg)
+		if err != nil {
+			log.Printf("Не удалось удалить сообщение о статусе: %v", err)
+		}
+	}()
 
 	var startDate, endDate time.Time
 	now := time.Now()
@@ -836,13 +844,34 @@ func (b *Bot) generateReport(chatID int64, reportType, period, format string) {
 	case "month":
 		startDate = now.AddDate(0, -1, 0)
 		endDate = now
-	case "custom":
-		// Для произвольного периода отправляем сообщение с инструкциями
-		b.api.Send(tgbotapi.NewMessage(chatID, "Функция выбора произвольного периода находится в разработке. Пожалуйста, используйте стандартные периоды."))
-		return
-	default:
-		b.api.Send(tgbotapi.NewMessage(chatID, "Неизвестный период. Пожалуйста, выберите корректный период."))
-		return
+	}
+	if strings.Contains(period, "custom") {
+		parts := strings.Split(period, "_")
+		if len(parts) != 3 {
+			b.api.Send(tgbotapi.NewMessage(chatID, "Неверный формат произвольного периода. Пожалуйста, попробуйте еще раз."))
+			return
+		}
+		startDateStr := parts[1]
+		endDateStr := parts[2]
+
+		parsedStartDate, err := time.Parse("2006-01-02", startDateStr)
+		if err != nil {
+			b.api.Send(tgbotapi.NewMessage(chatID, "Неверный формат начальной даты. Используйте формат ГГГГ-ММ-ДД."))
+			return
+		}
+		parsedEndDate, err := time.Parse("2006-01-02", endDateStr)
+		if err != nil {
+			b.api.Send(tgbotapi.NewMessage(chatID, "Неверный формат конечной даты. Используйте формат ГГГГ-ММ-ДД."))
+			return
+		}
+
+		startDate = parsedStartDate
+		endDate = parsedEndDate
+
+		if startDate.After(endDate) {
+			b.api.Send(tgbotapi.NewMessage(chatID, "Начальная дата не может быть позже конечной даты."))
+			return
+		}
 	}
 
 	// Генерируем отчет в зависимости от типа и формата
@@ -853,6 +882,7 @@ func (b *Bot) generateReport(chatID int64, reportType, period, format string) {
 			b.generatePriceReportExcel(chatID, startDate, endDate, b.config)
 		} else {
 			b.api.Send(tgbotapi.NewMessage(chatID, "Неизвестный формат отчета. Пожалуйста, выберите корректный формат."))
+			return
 		}
 	} else if reportType == "stocks" {
 		if format == "pdf" {
@@ -861,14 +891,12 @@ func (b *Bot) generateReport(chatID int64, reportType, period, format string) {
 			b.generateStockReportExcel(chatID, startDate, endDate, b.config)
 		} else {
 			b.api.Send(tgbotapi.NewMessage(chatID, "Неизвестный формат отчета. Пожалуйста, выберите корректный формат."))
+			return
 		}
 	} else {
 		b.api.Send(tgbotapi.NewMessage(chatID, "Неизвестный тип отчета. Пожалуйста, выберите корректный тип."))
+		return
 	}
-
-	// Удаляем сообщение о генерации отчета
-	deleteMsg := tgbotapi.NewDeleteMessage(chatID, statusMsg.MessageID)
-	b.api.Request(deleteMsg)
 }
 
 // generatePriceReport генерирует отчет по ценам в текстовом формате
