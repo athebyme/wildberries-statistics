@@ -663,10 +663,10 @@ func (b *Bot) generatePriceReport(chatID int64, startDate, endDate time.Time) {
 
 		// Добавляем информацию о товаре в отчет
 		reportText += fmt.Sprintf("Товар: %s (арт. %s)\n", product.Name, product.VendorCode)
-		reportText += fmt.Sprintf("Начальная цена: %.2f₽\n", float64(firstPrice)/100)
-		reportText += fmt.Sprintf("Конечная цена: %.2f₽\n", float64(lastPrice)/100)
-		reportText += fmt.Sprintf("Изменение: %.2f₽ (%.2f%%)\n", float64(priceChange)/100, priceChangePercent)
-		reportText += fmt.Sprintf("Мин. цена: %.2f₽, Макс. цена: %.2f₽\n", float64(minPrice)/100, float64(maxPrice)/100)
+		reportText += fmt.Sprintf("Начальная цена: %d₽\n", firstPrice)
+		reportText += fmt.Sprintf("Конечная цена: %d₽\n", lastPrice)
+		reportText += fmt.Sprintf("Изменение: %d₽ (%.2f%%)\n", priceChange, priceChangePercent)
+		reportText += fmt.Sprintf("Мин. цена: %d₽, Макс. цена: %d₽\n", minPrice, maxPrice)
 		reportText += fmt.Sprintf("Количество записей: %d\n\n", len(prices))
 	}
 
