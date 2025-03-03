@@ -42,7 +42,15 @@ func NewMonitoringService(cfg config.Config) (*MonitoringService, error) {
 		return nil, fmt.Errorf("connecting to database: %w", err)
 	}
 
-	telegramBot, err := telegram.NewBot(cfg.TelegramToken, cfg.TelegramChatID, database, cfg.AllowedUserIDs)
+	telegramBot, err := telegram.NewBot(
+		cfg.TelegramToken,
+		cfg.TelegramChatID,
+		database,
+		cfg.AllowedUserIDs,
+		telegram.ReportConfig{
+			MinPriceChangePercent: config.PriceChangeThreshold,
+			MinStockChangePercent: config.StockChangeThreshold,
+		})
 	if err != nil {
 		return nil, fmt.Errorf("initializing telegram bot: %w", err)
 	}

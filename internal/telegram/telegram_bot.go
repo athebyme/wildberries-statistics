@@ -7,11 +7,14 @@ import (
 	"github.com/jmoiron/sqlx"
 	"github.com/xuri/excelize/v2" // Add this package for Excel file creation
 	"log"
+	"math"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 	"wbmonitoring/monitoring/internal/db"
+	"wbmonitoring/monitoring/internal/models"
 )
 
 // Bot представляет Telegram бота с расширенным функционалом
@@ -20,10 +23,19 @@ type Bot struct {
 	chatID       int64
 	db           *sqlx.DB
 	allowedUsers map[int64]bool // Список разрешенных пользователей
+	config       ReportConfig
+}
+
+// Структура конфигурации для отчетов
+type ReportConfig struct {
+	// Минимальный процент изменения цены для включения в отчет динамики
+	MinPriceChangePercent float64 `json:"minPriceChangePercent"`
+	// Минимальный процент изменения остатка для включения в отчет динамики
+	MinStockChangePercent float64 `json:"minStockChangePercent"`
 }
 
 // NewBot создает нового Telegram бота
-func NewBot(token string, chatID int64, db *sqlx.DB, allowedUserIDs []int64) (*Bot, error) {
+func NewBot(token string, chatID int64, db *sqlx.DB, allowedUserIDs []int64, config ReportConfig) (*Bot, error) {
 	api, err := tgbotapi.NewBotAPI(token)
 	if err != nil {
 		return nil, fmt.Errorf("initializing telegram bot: %w", err)
@@ -40,6 +52,7 @@ func NewBot(token string, chatID int64, db *sqlx.DB, allowedUserIDs []int64) (*B
 		chatID:       chatID,
 		db:           db,
 		allowedUsers: allowedUsers,
+		config:       config,
 	}, nil
 }
 
@@ -253,6 +266,290 @@ func (b *Bot) sendFormatSelection(chatID int64, reportType, period string) {
 	b.api.Send(msg)
 }
 
+// addDynamicChangesSheet добавляет лист с динамикой изменений во времени для товаров
+// с изменениями больше порогового значения
+func addDynamicChangesSheet(
+	f *excelize.File,
+	products []models.ProductRecord,
+	ctx context.Context,
+	database *sqlx.DB,
+	startDate, endDate time.Time,
+	isPriceReport bool,
+	config ReportConfig,
+	warehouses []models.Warehouse,
+) error {
+	// Название листа в зависимости от типа отчета
+	sheetName := "Динамика цен"
+	if !isPriceReport {
+		sheetName = "Динамика остатков"
+	}
+
+	// Создаем новый лист
+	_, err := f.NewSheet(sheetName)
+	if err != nil {
+		return fmt.Errorf("ошибка при создании листа динамики: %v", err)
+	}
+
+	// Устанавливаем заголовки
+	var headers []string
+	if isPriceReport {
+		headers = []string{
+			"Товар", "Артикул", "Дата", "Цена (₽)", "Изменение (₽)", "Изменение (%)",
+		}
+	} else {
+		headers = []string{
+			"Товар", "Артикул", "Склад", "Дата", "Остаток (шт.)", "Изменение (шт.)", "Изменение (%)",
+		}
+	}
+
+	for i, header := range headers {
+		cell := fmt.Sprintf("%c%d", 'A'+i, 1)
+		f.SetCellValue(sheetName, cell, header)
+	}
+
+	// Устанавливаем стиль для заголовков
+	headerStyle, _ := f.NewStyle(&excelize.Style{
+		Font:      &excelize.Font{Bold: true},
+		Fill:      excelize.Fill{Type: "pattern", Color: []string{"#DDEBF7"}, Pattern: 1},
+		Alignment: &excelize.Alignment{Horizontal: "center"},
+		Border: []excelize.Border{
+			{Type: "top", Color: "#000000", Style: 1},
+			{Type: "left", Color: "#000000", Style: 1},
+			{Type: "right", Color: "#000000", Style: 1},
+			{Type: "bottom", Color: "#000000", Style: 1},
+		},
+	})
+	f.SetCellStyle(sheetName, "A1", string(rune('A'+len(headers)-1))+"1", headerStyle)
+
+	// Заполняем данные
+	row := 2
+	productsAdded := 0
+
+	// Для отчета по остаткам - обрабатываем каждый склад отдельно
+	if isPriceReport {
+		// Обрабатываем цены
+		for _, product := range products {
+			// Получаем все цены за период
+			prices, err := db.GetPricesForPeriod(ctx, database, product.ID, startDate, endDate)
+			if err != nil {
+				log.Printf("Error getting prices for product %d: %v", product.ID, err)
+				continue
+			}
+
+			if len(prices) < 2 {
+				continue // Нужно минимум 2 записи для отслеживания изменений
+			}
+
+			// Проверяем, есть ли существенные изменения
+			firstPrice := prices[0].FinalPrice
+			lastPrice := prices[len(prices)-1].FinalPrice
+			totalChangePercent := 0.0
+			if firstPrice > 0 {
+				totalChangePercent = float64(lastPrice-firstPrice) / float64(firstPrice) * 100
+			}
+
+			// Проверяем, превышает ли изменение пороговое значение
+			if math.Abs(totalChangePercent) < config.MinPriceChangePercent {
+				continue
+			}
+
+			// Добавляем товар в отчет динамики
+			var prevPrice int
+			var firstEntryForProduct bool = true
+
+			for i, price := range prices {
+				// Пропускаем первую запись для расчета изменений
+				if i == 0 {
+					prevPrice = price.FinalPrice
+					continue
+				}
+
+				// Рассчитываем изменение по сравнению с предыдущей записью
+				priceChange := price.FinalPrice - prevPrice
+				changePercent := 0.0
+				if prevPrice > 0 {
+					changePercent = float64(priceChange) / float64(prevPrice) * 100
+				}
+
+				// Добавляем только если есть изменение цены
+				if priceChange != 0 {
+					// Если это первая запись для данного товара, добавляем имя и артикул
+					if firstEntryForProduct {
+						f.SetCellValue(sheetName, fmt.Sprintf("A%d", row), product.Name)
+						f.SetCellValue(sheetName, fmt.Sprintf("B%d", row), product.VendorCode)
+						firstEntryForProduct = false
+						productsAdded++
+					} else {
+						// Для последующих записей оставляем пустыми ячейки имени и артикула
+						f.SetCellValue(sheetName, fmt.Sprintf("A%d", row), "")
+						f.SetCellValue(sheetName, fmt.Sprintf("B%d", row), "")
+					}
+
+					f.SetCellValue(sheetName, fmt.Sprintf("C%d", row), price.RecordedAt.Format("02.01.2006 15:04"))
+					f.SetCellValue(sheetName, fmt.Sprintf("D%d", row), float64(price.FinalPrice)/100)
+					f.SetCellValue(sheetName, fmt.Sprintf("E%d", row), float64(priceChange)/100)
+					f.SetCellValue(sheetName, fmt.Sprintf("F%d", row), changePercent)
+
+					row++
+				}
+
+				prevPrice = price.FinalPrice
+			}
+		}
+	} else {
+		// Обрабатываем остатки для каждого товара по каждому складу
+		for _, product := range products {
+			for _, warehouse := range warehouses {
+				// Получаем историю остатков
+				stocks, err := db.GetStocksForPeriod(ctx, database, product.ID, warehouse.ID, startDate, endDate)
+				if err != nil {
+					log.Printf("Error getting stocks for product %d on warehouse %d: %v",
+						product.ID, warehouse.ID, err)
+					continue
+				}
+
+				if len(stocks) < 2 {
+					continue // Нужно минимум 2 записи для отслеживания изменений
+				}
+
+				// Проверяем, есть ли существенные изменения
+				firstStock := stocks[0].Amount
+				lastStock := stocks[len(stocks)-1].Amount
+				totalChangePercent := 0.0
+				if firstStock > 0 {
+					totalChangePercent = float64(lastStock-firstStock) / float64(firstStock) * 100
+				} else if firstStock == 0 && lastStock > 0 {
+					// Если начальный остаток был 0, а теперь есть товары - это значительное изменение
+					totalChangePercent = 100.0
+				}
+
+				// Проверяем, превышает ли изменение пороговое значение
+				if math.Abs(totalChangePercent) < config.MinStockChangePercent {
+					continue
+				}
+
+				// Добавляем товар в отчет динамики
+				var prevStock int
+				var firstEntryForProduct bool = true
+
+				for i, stock := range stocks {
+					// Пропускаем первую запись для расчета изменений
+					if i == 0 {
+						prevStock = stock.Amount
+						continue
+					}
+
+					// Рассчитываем изменение по сравнению с предыдущей записью
+					stockChange := stock.Amount - prevStock
+					changePercent := 0.0
+					if prevStock > 0 {
+						changePercent = float64(stockChange) / float64(prevStock) * 100
+					} else if prevStock == 0 && stock.Amount > 0 {
+						changePercent = 100.0
+					}
+
+					// Добавляем только если есть изменение остатка
+					if stockChange != 0 {
+						// Если это первая запись для данного товара, добавляем имя и артикул
+						if firstEntryForProduct {
+							f.SetCellValue(sheetName, fmt.Sprintf("A%d", row), product.Name)
+							f.SetCellValue(sheetName, fmt.Sprintf("B%d", row), product.VendorCode)
+							f.SetCellValue(sheetName, fmt.Sprintf("C%d", row), warehouse.Name)
+							firstEntryForProduct = false
+							productsAdded++
+						} else {
+							// Для последующих записей оставляем пустыми ячейки имени и артикула
+							f.SetCellValue(sheetName, fmt.Sprintf("A%d", row), "")
+							f.SetCellValue(sheetName, fmt.Sprintf("B%d", row), "")
+							f.SetCellValue(sheetName, fmt.Sprintf("C%d", row), "")
+						}
+
+						f.SetCellValue(sheetName, fmt.Sprintf("D%d", row), stock.RecordedAt.Format("02.01.2006 15:04"))
+						f.SetCellValue(sheetName, fmt.Sprintf("E%d", row), stock.Amount)
+						f.SetCellValue(sheetName, fmt.Sprintf("F%d", row), stockChange)
+						f.SetCellValue(sheetName, fmt.Sprintf("G%d", row), changePercent)
+
+						row++
+					}
+
+					prevStock = stock.Amount
+				}
+			}
+		}
+	}
+
+	// Если товаров с существенными изменениями не найдено
+	if productsAdded == 0 {
+		emptyRow := 3
+		if isPriceReport {
+			f.SetCellValue(sheetName, fmt.Sprintf("A%d", emptyRow),
+				fmt.Sprintf("Товары с изменением цены более %.1f%% не найдены", config.MinPriceChangePercent))
+		} else {
+			f.SetCellValue(sheetName, fmt.Sprintf("A%d", emptyRow),
+				fmt.Sprintf("Товары с изменением остатка более %.1f%% не найдены", config.MinStockChangePercent))
+		}
+	}
+
+	// Автонастройка ширины столбцов
+	for i := range headers {
+		col := string(rune('A' + i))
+		width, _ := f.GetColWidth(sheetName, col)
+		if width < 15 {
+			f.SetColWidth(sheetName, col, col, 15)
+		}
+	}
+
+	// Устанавливаем стиль для чисел и процентов
+	if isPriceReport {
+		// Стиль для цен с двумя десятичными знаками
+		numberStyle, _ := f.NewStyle(&excelize.Style{
+			NumFmt: 2, // Формат с двумя десятичными знаками
+		})
+		f.SetCellStyle(sheetName, "D2", fmt.Sprintf("E%d", row-1), numberStyle)
+
+		// Стиль для процентов
+		percentStyle, _ := f.NewStyle(&excelize.Style{
+			NumFmt: 10, // Процентный формат
+		})
+		f.SetCellStyle(sheetName, "F2", fmt.Sprintf("F%d", row-1), percentStyle)
+	} else {
+		// Стиль для целых чисел
+		numberStyle, _ := f.NewStyle(&excelize.Style{
+			NumFmt: 1, // Целое число
+		})
+		f.SetCellStyle(sheetName, "E2", fmt.Sprintf("F%d", row-1), numberStyle)
+
+		// Стиль для процентов
+		percentStyle, _ := f.NewStyle(&excelize.Style{
+			NumFmt: 10, // Процентный формат
+		})
+		f.SetCellStyle(sheetName, "G2", fmt.Sprintf("G%d", row-1), percentStyle)
+	}
+
+	// Добавим группировку по товарам (объединение строк одного товара визуально)
+	currentProduct := ""
+	for r := 2; r < row; r++ {
+		productName, _ := f.GetCellValue(sheetName, fmt.Sprintf("A%d", r))
+		if productName != "" {
+			// Если начинается новый товар и текущий товар не пустой
+			if currentProduct != "" && currentProduct != productName {
+				// Применяем тонкий стиль границы для визуального разделения предыдущего товара
+				borderStyle, _ := f.NewStyle(&excelize.Style{
+					Border: []excelize.Border{
+						{Type: "bottom", Color: "#CCCCCC", Style: 1},
+					},
+				})
+				lastCol := string(rune('A' + len(headers) - 1))
+				f.SetCellStyle(sheetName, "A"+strconv.Itoa(r-1), lastCol+strconv.Itoa(r-1), borderStyle)
+			}
+			currentProduct = productName
+
+		}
+	}
+
+	return nil
+}
+
 // generateReport генерирует и отправляет отчет за выбранный период
 func (b *Bot) generateReport(chatID int64, reportType, period, format string) {
 	// Отправляем сообщение о начале генерации отчета
@@ -286,7 +583,7 @@ func (b *Bot) generateReport(chatID int64, reportType, period, format string) {
 		if format == "text" {
 			b.generatePriceReport(chatID, startDate, endDate)
 		} else if format == "excel" {
-			b.generatePriceReportExcel(chatID, startDate, endDate)
+			b.generatePriceReportExcel(chatID, startDate, endDate, b.config)
 		} else {
 			b.api.Send(tgbotapi.NewMessage(chatID, "Неизвестный формат отчета. Пожалуйста, выберите корректный формат."))
 		}
@@ -294,7 +591,7 @@ func (b *Bot) generateReport(chatID int64, reportType, period, format string) {
 		if format == "text" {
 			b.generateStockReport(chatID, startDate, endDate)
 		} else if format == "excel" {
-			b.generateStockReportExcel(chatID, startDate, endDate)
+			b.generateStockReportExcel(chatID, startDate, endDate, b.config)
 		} else {
 			b.api.Send(tgbotapi.NewMessage(chatID, "Неизвестный формат отчета. Пожалуйста, выберите корректный формат."))
 		}
@@ -389,10 +686,10 @@ func (b *Bot) generatePriceReport(chatID int64, startDate, endDate time.Time) {
 }
 
 // generatePriceReportExcel генерирует отчет по ценам в формате Excel
-func (b *Bot) generatePriceReportExcel(chatID int64, startDate, endDate time.Time) {
+func (b *Bot) generatePriceReportExcel(chatID int64, startDate, endDate time.Time, config ReportConfig) {
 	ctx := context.Background()
 
-	// Получаем все товары
+	// Код остается тот же, как был раньше, до создания Excel файла
 	products, err := db.GetAllProducts(ctx, b.db)
 	if err != nil {
 		b.api.Send(tgbotapi.NewMessage(chatID, fmt.Sprintf("Ошибка при получении списка товаров: %v", err)))
@@ -498,6 +795,12 @@ func (b *Bot) generatePriceReportExcel(chatID int64, startDate, endDate time.Tim
 		NumFmt: 2, // Формат с двумя десятичными знаками
 	})
 	f.SetCellStyle(sheetName, "C2", fmt.Sprintf("H%d", row-1), numberStyle)
+
+	warehouses, _ := db.GetAllWarehouses(ctx, b.db) // Получаем список складов для совместимости с функцией
+	err = addDynamicChangesSheet(f, products, ctx, b.db, startDate, endDate, true, config, warehouses)
+	if err != nil {
+		log.Printf("Error adding dynamic changes sheet: %v", err)
+	}
 
 	// Сохраняем файл
 	filename := fmt.Sprintf("price_report_%s_%s.xlsx",
@@ -632,11 +935,10 @@ func (b *Bot) generateStockReport(chatID int64, startDate, endDate time.Time) {
 }
 
 // generateStockReportExcel генерирует отчет по остаткам в формате Excel
-// generateStockReportExcel генерирует отчет по остаткам в формате Excel
-func (b *Bot) generateStockReportExcel(chatID int64, startDate, endDate time.Time) {
+func (b *Bot) generateStockReportExcel(chatID int64, startDate, endDate time.Time, config ReportConfig) {
 	ctx := context.Background()
 
-	// Получаем все товары
+	// Код остается тот же, как был раньше, до создания Excel файла
 	products, err := db.GetAllProducts(ctx, b.db)
 	if err != nil {
 		b.api.Send(tgbotapi.NewMessage(chatID, fmt.Sprintf("Ошибка при получении списка товаров: %v", err)))
@@ -865,6 +1167,12 @@ func (b *Bot) generateStockReportExcel(chatID int64, startDate, endDate time.Tim
 
 	// Устанавливаем активный лист
 	f.SetActiveSheet(index)
+
+	// После заполнения основного отчета добавляем новый лист с динамикой изменений
+	err = addDynamicChangesSheet(f, products, ctx, b.db, startDate, endDate, false, config, warehouses)
+	if err != nil {
+		log.Printf("Error adding dynamic changes sheet: %v", err)
+	}
 
 	// Сохраняем файл
 	filename := fmt.Sprintf("stock_report_%s_%s.xlsx",
