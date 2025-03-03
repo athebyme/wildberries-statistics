@@ -109,7 +109,7 @@ CREATE TABLE IF NOT EXISTS warehouses(
     office_id BIGINT,
     id BIGINT,
     cargo_type INTEGER,
-    delivery_type INTEGER,
+    delivery_type INTEGER
 );
 
 CREATE INDEX IF NOT EXISTS idx_warehouses_name ON warehouses(name);
