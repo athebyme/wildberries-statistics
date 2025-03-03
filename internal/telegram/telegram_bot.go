@@ -891,3 +891,323 @@ func (b *Bot) generateStockReportExcel(chatID int64, startDate, endDate time.Tim
 	// Удаляем временный файл
 	os.Remove(filepath)
 }
+
+// SendDailyReport отправляет ежедневный отчет по ценам и остаткам в чат
+func (b *Bot) SendDailyReport(ctx context.Context) error {
+	// Определяем даты для отчета: сегодня с 00:00 до текущего момента
+	now := time.Now()
+	startDate := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+	endDate := now
+
+	// Отправляем сообщение о начале формирования отчета
+	statusMsg, err := b.api.Send(tgbotapi.NewMessage(b.chatID, "Формирование ежедневного отчета... Пожалуйста, подождите."))
+	if err != nil {
+		return fmt.Errorf("error sending status message: %w", err)
+	}
+
+	// Генерируем отчет по ценам в Excel
+	errPrice := b.generateDailyPriceReport(ctx, startDate, endDate)
+	if errPrice != nil {
+		log.Printf("Error generating daily price report: %v", errPrice)
+		b.api.Send(tgbotapi.NewMessage(b.chatID, fmt.Sprintf("Ошибка при формировании отчета по ценам: %v", errPrice)))
+	}
+
+	// Генерируем отчет по остаткам в Excel
+	errStock := b.generateDailyStockReport(ctx, startDate, endDate)
+	if errStock != nil {
+		log.Printf("Error generating daily stock report: %v", errStock)
+		b.api.Send(tgbotapi.NewMessage(b.chatID, fmt.Sprintf("Ошибка при формировании отчета по остаткам: %v", errStock)))
+	}
+
+	// Удаляем статусное сообщение
+	deleteMsg := tgbotapi.NewDeleteMessage(b.chatID, statusMsg.MessageID)
+	b.api.Request(deleteMsg)
+
+	// Если обе операции завершились с ошибкой, возвращаем общую ошибку
+	if errPrice != nil && errStock != nil {
+		return fmt.Errorf("failed to generate daily reports: price: %v, stock: %v", errPrice, errStock)
+	}
+
+	return nil
+}
+
+// generateDailyPriceReport генерирует и отправляет ежедневный отчет по ценам
+func (b *Bot) generateDailyPriceReport(ctx context.Context, startDate, endDate time.Time) error {
+	// Получаем все товары с изменившейся ценой за сегодня
+	products, err := db.GetAllProducts(ctx, b.db)
+	if err != nil {
+		return fmt.Errorf("error getting products: %w", err)
+	}
+
+	if len(products) == 0 {
+		b.api.Send(tgbotapi.NewMessage(b.chatID, "Товары не найдены в базе данных."))
+		return nil
+	}
+
+	// Создаем новый Excel файл
+	f := excelize.NewFile()
+	sheetName := "Ежедневный отчет по ценам"
+	f.SetSheetName("Sheet1", sheetName)
+
+	// Устанавливаем заголовки
+	headers := []string{
+		"Товар", "Артикул", "Начальная цена (₽)", "Текущая цена (₽)",
+		"Изменение (₽)", "Изменение (%)",
+	}
+	for i, header := range headers {
+		cell := fmt.Sprintf("%c%d", 'A'+i, 1)
+		f.SetCellValue(sheetName, cell, header)
+	}
+
+	// Устанавливаем стиль для заголовков
+	headerStyle, _ := f.NewStyle(&excelize.Style{
+		Font:      &excelize.Font{Bold: true},
+		Fill:      excelize.Fill{Type: "pattern", Color: []string{"#DDEBF7"}, Pattern: 1},
+		Alignment: &excelize.Alignment{Horizontal: "center"},
+		Border: []excelize.Border{
+			{Type: "top", Color: "#000000", Style: 1},
+			{Type: "left", Color: "#000000", Style: 1},
+			{Type: "right", Color: "#000000", Style: 1},
+			{Type: "bottom", Color: "#000000", Style: 1},
+		},
+	})
+	f.SetCellStyle(sheetName, "A1", string(rune('A'+len(headers)-1))+"1", headerStyle)
+
+	// Заполняем данные
+	row := 2
+	productsAdded := 0
+
+	for _, product := range products {
+		// Получаем историю цен для товара за период
+		prices, err := db.GetPricesForPeriod(ctx, b.db, product.ID, startDate, endDate)
+		if err != nil {
+			log.Printf("Error getting prices for product %d: %v", product.ID, err)
+			continue
+		}
+
+		if len(prices) <= 1 {
+			// Нет изменений цены за сегодня
+			continue
+		}
+
+		// Первая и последняя цена за период
+		firstPrice := prices[0].FinalPrice
+		lastPrice := prices[len(prices)-1].FinalPrice
+
+		// Если цена не изменилась, пропускаем товар
+		if firstPrice == lastPrice {
+			continue
+		}
+
+		// Рассчитываем изменение цены за период
+		priceChange := lastPrice - firstPrice
+		priceChangePercent := float64(0)
+		if firstPrice > 0 {
+			priceChangePercent = float64(priceChange) / float64(firstPrice) * 100
+		}
+
+		// Добавляем данные в Excel
+		f.SetCellValue(sheetName, fmt.Sprintf("A%d", row), product.Name)
+		f.SetCellValue(sheetName, fmt.Sprintf("B%d", row), product.VendorCode)
+		f.SetCellValue(sheetName, fmt.Sprintf("C%d", row), float64(firstPrice)/100)
+		f.SetCellValue(sheetName, fmt.Sprintf("D%d", row), float64(lastPrice)/100)
+		f.SetCellValue(sheetName, fmt.Sprintf("E%d", row), float64(priceChange)/100)
+		f.SetCellValue(sheetName, fmt.Sprintf("F%d", row), priceChangePercent)
+
+		row++
+		productsAdded++
+	}
+
+	// Если нет изменений в ценах за сегодня, отправляем уведомление и выходим
+	if productsAdded == 0 {
+		b.api.Send(tgbotapi.NewMessage(b.chatID, "За сегодня не было изменений в ценах товаров."))
+		return nil
+	}
+
+	// Автонастройка ширины столбцов
+	for i := range headers {
+		col := string(rune('A' + i))
+		width, _ := f.GetColWidth(sheetName, col)
+		if width < 15 {
+			f.SetColWidth(sheetName, col, col, 15)
+		}
+	}
+
+	// Устанавливаем стиль для чисел
+	numberStyle, _ := f.NewStyle(&excelize.Style{
+		NumFmt: 2, // Формат с двумя десятичными знаками
+	})
+	f.SetCellStyle(sheetName, "C2", fmt.Sprintf("E%d", row-1), numberStyle)
+
+	// Устанавливаем стиль для процентов
+	percentStyle, _ := f.NewStyle(&excelize.Style{
+		NumFmt: 10, // Процентный формат
+	})
+	f.SetCellStyle(sheetName, "F2", fmt.Sprintf("F%d", row-1), percentStyle)
+
+	// Сохраняем файл
+	filename := fmt.Sprintf("daily_price_report_%s.xlsx", startDate.Format("02-01-2006"))
+	filepath := filepath.Join(os.TempDir(), filename)
+	if err := f.SaveAs(filepath); err != nil {
+		return fmt.Errorf("error saving Excel file: %w", err)
+	}
+
+	// Отправляем файл в Telegram
+	doc := tgbotapi.NewDocument(b.chatID, tgbotapi.FilePath(filepath))
+	doc.Caption = fmt.Sprintf("📈 Ежедневный отчет по изменениям цен за %s",
+		startDate.Format("02.01.2006"))
+	_, err = b.api.Send(doc)
+	if err != nil {
+		return fmt.Errorf("error sending Excel file: %w", err)
+	}
+
+	// Удаляем временный файл
+	os.Remove(filepath)
+	return nil
+}
+
+// generateDailyStockReport генерирует и отправляет ежедневный отчет по остаткам
+func (b *Bot) generateDailyStockReport(ctx context.Context, startDate, endDate time.Time) error {
+	// Получаем все товары
+	products, err := db.GetAllProducts(ctx, b.db)
+	if err != nil {
+		return fmt.Errorf("error getting products: %w", err)
+	}
+
+	if len(products) == 0 {
+		b.api.Send(tgbotapi.NewMessage(b.chatID, "Товары не найдены в базе данных."))
+		return nil
+	}
+
+	// Получаем все склады
+	warehouses, err := db.GetAllWarehouses(ctx, b.db)
+	if err != nil {
+		return fmt.Errorf("error getting warehouses: %w", err)
+	}
+
+	// Создаем новый Excel файл
+	f := excelize.NewFile()
+	sheetName := "Ежедневный отчет по остаткам"
+	f.SetSheetName("Sheet1", sheetName)
+
+	// Устанавливаем заголовки
+	headers := []string{
+		"Товар", "Артикул", "Склад", "Начальный остаток (шт.)", "Текущий остаток (шт.)",
+		"Изменение (шт.)", "Изменение (%)",
+	}
+	for i, header := range headers {
+		cell := fmt.Sprintf("%c%d", 'A'+i, 1)
+		f.SetCellValue(sheetName, cell, header)
+	}
+
+	// Устанавливаем стиль для заголовков
+	headerStyle, _ := f.NewStyle(&excelize.Style{
+		Font:      &excelize.Font{Bold: true},
+		Fill:      excelize.Fill{Type: "pattern", Color: []string{"#DDEBF7"}, Pattern: 1},
+		Alignment: &excelize.Alignment{Horizontal: "center"},
+		Border: []excelize.Border{
+			{Type: "top", Color: "#000000", Style: 1},
+			{Type: "left", Color: "#000000", Style: 1},
+			{Type: "right", Color: "#000000", Style: 1},
+			{Type: "bottom", Color: "#000000", Style: 1},
+		},
+	})
+	f.SetCellStyle(sheetName, "A1", string(rune('A'+len(headers)-1))+"1", headerStyle)
+
+	// Заполняем данные
+	row := 2
+	changesFound := false
+
+	for _, product := range products {
+		for _, warehouse := range warehouses {
+			// Получаем историю остатков для товара на конкретном складе за период
+			stocks, err := db.GetStocksForPeriod(ctx, b.db, product.ID, warehouse.ID, startDate, endDate)
+			if err != nil {
+				log.Printf("Error getting stocks for product %d on warehouse %d: %v",
+					product.ID, warehouse.ID, err)
+				continue
+			}
+
+			if len(stocks) <= 1 {
+				// Нет изменений в остатках за сегодня на этом складе
+				continue
+			}
+
+			// Первый и последний остаток за период
+			firstStock := stocks[0].Amount
+			lastStock := stocks[len(stocks)-1].Amount
+
+			// Если остаток не изменился, пропускаем запись
+			if firstStock == lastStock {
+				continue
+			}
+
+			changesFound = true
+
+			// Рассчитываем изменение остатка за период
+			stockChange := lastStock - firstStock
+			stockChangePercent := float64(0)
+			if firstStock > 0 {
+				stockChangePercent = float64(stockChange) / float64(firstStock) * 100
+			}
+
+			// Добавляем данные в Excel
+			f.SetCellValue(sheetName, fmt.Sprintf("A%d", row), product.Name)
+			f.SetCellValue(sheetName, fmt.Sprintf("B%d", row), product.VendorCode)
+			f.SetCellValue(sheetName, fmt.Sprintf("C%d", row), warehouse.Name)
+			f.SetCellValue(sheetName, fmt.Sprintf("D%d", row), firstStock)
+			f.SetCellValue(sheetName, fmt.Sprintf("E%d", row), lastStock)
+			f.SetCellValue(sheetName, fmt.Sprintf("F%d", row), stockChange)
+			f.SetCellValue(sheetName, fmt.Sprintf("G%d", row), stockChangePercent)
+
+			row++
+		}
+	}
+
+	// Если нет изменений в остатках за сегодня, отправляем уведомление и выходим
+	if !changesFound {
+		b.api.Send(tgbotapi.NewMessage(b.chatID, "За сегодня не было изменений в остатках товаров."))
+		return nil
+	}
+
+	// Автонастройка ширины столбцов
+	for i := range headers {
+		col := string(rune('A' + i))
+		width, _ := f.GetColWidth(sheetName, col)
+		if width < 15 {
+			f.SetColWidth(sheetName, col, col, 15)
+		}
+	}
+
+	// Устанавливаем стиль для чисел
+	numberStyle, _ := f.NewStyle(&excelize.Style{
+		NumFmt: 1, // Целое число
+	})
+	f.SetCellStyle(sheetName, "D2", fmt.Sprintf("F%d", row-1), numberStyle)
+
+	// Устанавливаем стиль для процентов
+	percentStyle, _ := f.NewStyle(&excelize.Style{
+		NumFmt: 10, // Процентный формат
+	})
+	f.SetCellStyle(sheetName, "G2", fmt.Sprintf("G%d", row-1), percentStyle)
+
+	// Сохраняем файл
+	filename := fmt.Sprintf("daily_stock_report_%s.xlsx", startDate.Format("02-01-2006"))
+	filepath := filepath.Join(os.TempDir(), filename)
+	if err := f.SaveAs(filepath); err != nil {
+		return fmt.Errorf("error saving Excel file: %w", err)
+	}
+
+	// Отправляем файл в Telegram
+	doc := tgbotapi.NewDocument(b.chatID, tgbotapi.FilePath(filepath))
+	doc.Caption = fmt.Sprintf("📦 Ежедневный отчет по изменениям остатков за %s",
+		startDate.Format("02.01.2006"))
+	_, err = b.api.Send(doc)
+	if err != nil {
+		return fmt.Errorf("error sending Excel file: %w", err)
+	}
+
+	// Удаляем временный файл
+	os.Remove(filepath)
+	return nil
+}

@@ -109,6 +109,13 @@ func (s *RecordCleanupService) processProductPrices(ctx context.Context, product
 
 	// Обрабатываем записи для каждого размера отдельно
 	for _, sizeID := range sizes {
+		// Получаем последнюю известную цену до начала обрабатываемого периода
+		lastKnownPrice, err := s.getLastKnownPriceBefore(ctx, productID, sizeID, startDate)
+		if err != nil {
+			log.Printf("Error getting last known price for product %d, size %d: %v",
+				productID, sizeID, err)
+		}
+
 		// Получаем почасовые записи о ценах
 		for hour := 0; hour < 24; hour++ {
 			hourStart := time.Date(startDate.Year(), startDate.Month(), startDate.Day(), hour, 0, 0, 0, startDate.Location())
@@ -122,7 +129,20 @@ func (s *RecordCleanupService) processProductPrices(ctx context.Context, product
 				continue
 			}
 
-			// Если есть записи, сохраняем почасовой снимок
+			// Если нет записей за этот час, но есть предыдущая известная цена, создаем запись
+			if len(priceRecords) == 0 && lastKnownPrice != nil {
+				// Создаем копию последней известной цены с новым временем
+				hourlyRecord := *lastKnownPrice
+				hourlyRecord.RecordedAt = hourStart
+				hourlyRecord.ID = 0 // Сбрасываем ID, так как это новая запись
+
+				priceRecords = append(priceRecords, hourlyRecord)
+			} else if len(priceRecords) > 0 {
+				// Если есть записи за этот час, обновляем последнюю известную цену
+				lastKnownPrice = &priceRecords[len(priceRecords)-1]
+			}
+
+			// Сохраняем почасовой снимок и все изменения
 			if len(priceRecords) > 0 {
 				err = s.hourlyDataKeeper.SaveHourlyPriceData(ctx, productID, sizeID, hourStart, priceRecords)
 				if err != nil {
@@ -146,6 +166,13 @@ func (s *RecordCleanupService) processProductStocks(ctx context.Context, product
 
 	// Обрабатываем записи для каждого склада отдельно
 	for _, warehouseID := range warehouses {
+		// Получаем последний известный остаток до начала обрабатываемого периода
+		lastKnownStock, err := s.getLastKnownStockBefore(ctx, productID, warehouseID, startDate)
+		if err != nil {
+			log.Printf("Error getting last known stock for product %d, warehouse %d: %v",
+				productID, warehouseID, err)
+		}
+
 		// Получаем почасовые записи об остатках
 		for hour := 0; hour < 24; hour++ {
 			hourStart := time.Date(startDate.Year(), startDate.Month(), startDate.Day(), hour, 0, 0, 0, startDate.Location())
@@ -159,7 +186,20 @@ func (s *RecordCleanupService) processProductStocks(ctx context.Context, product
 				continue
 			}
 
-			// Если есть записи, сохраняем почасовой снимок
+			// Если нет записей за этот час, но есть предыдущий известный остаток, создаем запись
+			if len(stockRecords) == 0 && lastKnownStock != nil {
+				// Создаем копию последнего известного остатка с новым временем
+				hourlyRecord := *lastKnownStock
+				hourlyRecord.RecordedAt = hourStart
+				hourlyRecord.ID = 0 // Сбрасываем ID, так как это новая запись
+
+				stockRecords = append(stockRecords, hourlyRecord)
+			} else if len(stockRecords) > 0 {
+				// Если есть записи за этот час, обновляем последний известный остаток
+				lastKnownStock = &stockRecords[len(stockRecords)-1]
+			}
+
+			// Сохраняем почасовой снимок и все изменения
 			if len(stockRecords) > 0 {
 				err = s.hourlyDataKeeper.SaveHourlyStockData(ctx, productID, warehouseID, hourStart, stockRecords)
 				if err != nil {
@@ -171,6 +211,48 @@ func (s *RecordCleanupService) processProductStocks(ctx context.Context, product
 	}
 
 	return nil
+}
+
+// getLastKnownPriceBefore возвращает последнюю известную цену до указанной даты
+func (s *RecordCleanupService) getLastKnownPriceBefore(ctx context.Context, productID int, sizeID int, date time.Time) (*models.PriceRecord, error) {
+	var record models.PriceRecord
+	query := `
+        SELECT * FROM price_records 
+        WHERE product_id = $1 AND size_id = $2 AND recorded_at < $3
+        ORDER BY recorded_at DESC
+        LIMIT 1
+    `
+
+	err := s.db.GetContext(ctx, &record, query, productID, sizeID, date)
+	if err != nil {
+		if err.Error() == "sql: no rows in result set" {
+			return nil, nil // Нет предыдущих записей
+		}
+		return nil, fmt.Errorf("selecting last known price: %w", err)
+	}
+
+	return &record, nil
+}
+
+// getLastKnownStockBefore возвращает последний известный остаток до указанной даты
+func (s *RecordCleanupService) getLastKnownStockBefore(ctx context.Context, productID int, warehouseID int64, date time.Time) (*models.StockRecord, error) {
+	var record models.StockRecord
+	query := `
+        SELECT * FROM stock_records 
+        WHERE product_id = $1 AND warehouse_id = $2 AND recorded_at < $3
+        ORDER BY recorded_at DESC
+        LIMIT 1
+    `
+
+	err := s.db.GetContext(ctx, &record, query, productID, warehouseID, date)
+	if err != nil {
+		if err.Error() == "sql: no rows in result set" {
+			return nil, nil // Нет предыдущих записей
+		}
+		return nil, fmt.Errorf("selecting last known stock: %w", err)
+	}
+
+	return &record, nil
 }
 
 // deleteOldRecords удаляет записи старше указанной даты
