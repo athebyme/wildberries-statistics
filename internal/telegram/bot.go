@@ -79,6 +79,21 @@ func (b *Bot) StartBot(ctx context.Context) {
 	}
 }
 
+// SendTelegramAlert отправляет оповещение в Telegram
+func (b *Bot) SendTelegramAlert(message string) error {
+	msg := tgbotapi.NewMessage(b.chatID, message)
+	_, err := b.api.Send(msg)
+	return err
+}
+
+// SendTelegramAlertWithParseMode отправляет оповещение в Telegram с указанным режимом форматирования
+func (b *Bot) SendTelegramAlertWithParseMode(message, parseMode string) error {
+	msg := tgbotapi.NewMessage(b.chatID, message)
+	msg.ParseMode = parseMode
+	_, err := b.api.Send(msg)
+	return err
+}
+
 // sendWelcomeMessage отправляет приветственное сообщение
 func (b *Bot) sendWelcomeMessage(chatID int64) {
 	welcomeText := `Добро пожаловать в бот мониторинга Wildberries!
