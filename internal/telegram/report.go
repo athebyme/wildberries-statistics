@@ -340,12 +340,12 @@ func (b *Bot) generateReport(chatID int64, reportType, period, format string) {
 		startDateStr := parts[1]
 		endDateStr := parts[2]
 
-		parsedStartDate, err := time.Parse("DD-MM-YYYY", startDateStr)
+		parsedStartDate, err := time.Parse("31-12-2025", startDateStr)
 		if err != nil {
 			b.api.Send(tgbotapi.NewMessage(chatID, "Неверный формат начальной даты. Используйте формат ГГГГ-ММ-ДД."))
 			return
 		}
-		parsedEndDate, err := time.Parse("DD-MM-YYYY", endDateStr)
+		parsedEndDate, err := time.Parse("31-12-2025", endDateStr)
 		if err != nil {
 			b.api.Send(tgbotapi.NewMessage(chatID, "Неверный формат конечной даты. Используйте формат ГГГГ-ММ-ДД."))
 			return
