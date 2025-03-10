@@ -9,7 +9,7 @@ require (
 	github.com/signintech/gopdf v0.30.0
 	github.com/xuri/excelize/v2 v2.9.0
 	golang.org/x/time v0.10.0
-	gopkg.in/gomail.v2 v2.0.0-20160411212932-81ebce5c23df
+	gopkg.in/mail.v2 v2.3.1
 )
 
 require (

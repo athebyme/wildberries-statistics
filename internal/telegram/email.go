@@ -2,8 +2,9 @@ package telegram
 
 import (
 	"fmt"
-	"gopkg.in/gomail.v2"
+	"gopkg.in/mail.v2"
 	"log"
+	"net/smtp"
 	"os"
 	"regexp"
 	"strconv"
@@ -94,19 +95,9 @@ func (b *Bot) sendEmail(to string, reportType string, period string, filePath st
 		return fmt.Errorf("неверный формат SMTP_PORT: %v", err)
 	}
 
-	smtpUser := os.Getenv("SMTP_USER")
-	if smtpUser == "" {
-		return fmt.Errorf("SMTP_USER не установлен")
-	}
-
-	smtpPassword := os.Getenv("SMTP_PASSWORD")
-	if smtpPassword == "" {
-		return fmt.Errorf("SMTP_PASSWORD не установлен")
-	}
-
 	// Создаем новое сообщение
-	m := gomail.NewMessage()
-	m.SetHeader("From", smtpUser)
+	m := mail.NewMessage()
+	m.SetHeader("From", "noreply@athebyme-market.ru")
 	m.SetHeader("To", to)
 
 	// Формируем тему в зависимости от типа отчета
@@ -122,25 +113,56 @@ func (b *Bot) sendEmail(to string, reportType string, period string, filePath st
 	m.SetBody("text/plain", fmt.Sprintf("Отчет %s за период %s", subject, period))
 
 	// Прикрепляем файл отчета
-	m.Attach(filePath, gomail.Rename(reportName))
+	m.Attach(filePath, mail.Rename(reportName))
 
 	// Проверяем существование файла
 	if _, err := os.Stat(filePath); os.IsNotExist(err) {
 		return fmt.Errorf("файл отчета не существует: %s", filePath)
 	}
 
-	// Отправляем сообщение
-	d := gomail.NewDialer(smtpHost, smtpPort, smtpUser, smtpPassword)
+	// Создаем dialer с пустыми учетными данными для MailHog
+	d := mail.NewDialer(smtpHost, smtpPort, "", "")
 
-	smtpSSLStr := os.Getenv("SMTP_SSL")
-	smtpSSL := smtpSSLStr != "false"
-
-	if smtpSSL && smtpPort != 25 {
-		d.SSL = true
-	}
+	// Критически важно: отключаем SSL и StartTLS для MailHog
+	d.SSL = false
+	d.TLSConfig = nil
+	d.StartTLSPolicy = mail.NoStartTLS
 
 	// Добавляем логирование перед отправкой
 	log.Printf("Отправка email на %s через SMTP сервер %s:%d", to, smtpHost, smtpPort)
 
 	return d.DialAndSend(m)
+}
+func (b *Bot) sendEmailSimple(to string, reportType string, period string, filePath string, reportName string) error {
+	smtpHost := os.Getenv("SMTP_HOST")
+	smtpPortStr := os.Getenv("SMTP_PORT")
+	smtpPort, _ := strconv.Atoi(smtpPortStr)
+	smtpAddr := fmt.Sprintf("%s:%d", smtpHost, smtpPort)
+
+	// Чтение файла для прикрепления
+	_, err := os.ReadFile(filePath)
+	if err != nil {
+		return fmt.Errorf("не удалось прочитать файл: %v", err)
+	}
+
+	// Формирование простого сообщения
+	var subject string
+	if reportType == "prices" {
+		subject = "Отчет по ценам"
+	} else {
+		subject = "Отчет по остаткам"
+	}
+
+	// Простая отправка через SMTP без шифрования
+	message := []byte(fmt.Sprintf("To: %s\r\n"+
+		"Subject: %s\r\n"+
+		"Content-Type: text/plain; charset=UTF-8\r\n"+
+		"\r\n"+
+		"Отчет %s за период %s\r\n",
+		to, subject, subject, period))
+
+	log.Printf("Отправка email на %s через SMTP сервер %s", to, smtpAddr)
+
+	// Отправка без аутентификации для MailHog
+	return smtp.SendMail(smtpAddr, nil, "noreply@example.com", []string{to}, message)
 }
