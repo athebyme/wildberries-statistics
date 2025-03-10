@@ -305,14 +305,14 @@ func (b *Bot) getPeriodName(period string) string {
 			endStr := parts[2]
 
 			// Преобразуем формат дат
-			layout := "31.01.2006"
+			layout := "02.01.2006"
 			start, err1 := time.Parse(layout, startStr)
 			end, err2 := time.Parse(layout, endStr)
 
 			if err1 == nil && err2 == nil {
 				return fmt.Sprintf("период с %s по %s",
-					start.Format("31.01.2006"),
-					end.Format("31.01.2006"))
+					start.Format("02.01.2006"),
+					end.Format("02.01.2006"))
 			}
 		}
 	}
@@ -341,7 +341,7 @@ func (b *Bot) parseCustomPeriod(periodStr string) (startDate, endDate time.Time,
 	}
 
 	// Парсим даты
-	// Используем "02.01.2006" вместо "31.01.2006"
+	// Используем "02.01.2006" вместо "02.01.2006"
 	layout := "02.01.2006" // Изменено здесь!
 	startDate, err = time.Parse(layout, strings.TrimSpace(dates[0]))
 	if err != nil {
@@ -456,8 +456,8 @@ func (b *Bot) handleMessage(message *tgbotapi.Message) {
 		// Форматируем период для использования в callback data
 		// Используем формат "startYYYYMMDD_endYYYYMMDD"
 		periodCode := fmt.Sprintf("custom_%s_%s",
-			startDate.Format("31.01.2006"),
-			endDate.Format("31.01.2006"))
+			startDate.Format("02.01.2006"),
+			endDate.Format("02.01.2006"))
 
 		// Очищаем состояние пользователя
 		b.clearUserState(message.Chat.ID)
@@ -465,8 +465,8 @@ func (b *Bot) handleMessage(message *tgbotapi.Message) {
 		// Отправляем сообщение о выбранном периоде
 		confirmMsg := tgbotapi.NewMessage(message.Chat.ID,
 			fmt.Sprintf("Выбран период с %s по %s",
-				startDate.Format("31.01.2006"),
-				endDate.Format("31.01.2006")))
+				startDate.Format("02.01.2006"),
+				endDate.Format("02.01.2006")))
 		b.api.Send(confirmMsg)
 
 		// Отправляем выбор формата для отчета
@@ -610,11 +610,11 @@ func (b *Bot) sendReportToEmail(chatID int64, userID int64, reportType, period, 
 	if strings.HasPrefix(period, "custom_") {
 		parts := strings.Split(period, "_")
 		if len(parts) == 3 {
-			startDate, _ := time.ParseInLocation("31.01.2006", parts[1], time.Local)
-			endDate, _ := time.ParseInLocation("31.01.2006", parts[2], time.Local)
+			startDate, _ := time.ParseInLocation("02.01.2006", parts[1], time.Local)
+			endDate, _ := time.ParseInLocation("02.01.2006", parts[2], time.Local)
 			displayPeriod = fmt.Sprintf("%s - %s",
-				startDate.Format("31.01.2006"),
-				endDate.Format("31.01.2006"))
+				startDate.Format("02.01.2006"),
+				endDate.Format("02.01.2006"))
 		}
 	} else {
 		switch period {
