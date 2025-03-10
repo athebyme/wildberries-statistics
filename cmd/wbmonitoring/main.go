@@ -55,10 +55,10 @@ func main() {
 
 	log.Println("Starting Wildberries Monitoring Service")
 
-	err = service.SendGreetings(ctx)
-	if err != nil {
-		log.Fatalf("Monitoring service stopped with error: %v", err)
-	}
+	//err = service.SendGreetings(ctx)
+	//if err != nil {
+	//	log.Fatalf("Monitoring service stopped with error: %v", err)
+	//}
 
 	// Запускаем мониторинг и product updater
 	go func() {
