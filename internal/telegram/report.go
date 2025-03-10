@@ -330,33 +330,42 @@ func (b *Bot) generateReport(chatID int64, reportType, period, format string) {
 	case "month":
 		startDate = now.AddDate(0, -1, 0)
 		endDate = now
-	}
-	if strings.Contains(period, "custom") {
-		log.Printf(period)
-		parts := strings.Split(period, "_")
-		if len(parts) != 3 {
-			b.api.Send(tgbotapi.NewMessage(chatID, "Неверный формат произвольного периода. Пожалуйста, попробуйте еще раз."))
-			return
-		}
-		startDateStr := parts[1]
-		endDateStr := parts[2]
+	default:
+		// Обработка произвольного периода
+		if strings.HasPrefix(period, "custom") {
+			log.Printf("Custom period: %s", period)
+			parts := strings.Split(period, "_")
+			if len(parts) != 3 {
+				b.api.Send(tgbotapi.NewMessage(chatID, "Неверный формат произвольного периода. Пожалуйста, попробуйте еще раз."))
+				return
+			}
+			startDateStr := parts[1]
+			endDateStr := parts[2]
 
-		parsedStartDate, err := time.Parse("31-12-2025", startDateStr)
-		if err != nil {
-			b.api.Send(tgbotapi.NewMessage(chatID, "Неверный формат начальной даты. Используйте формат ГГГГ-ММ-ДД."))
-			return
-		}
-		parsedEndDate, err := time.Parse("31-12-2025", endDateStr)
-		if err != nil {
-			b.api.Send(tgbotapi.NewMessage(chatID, "Неверный формат конечной даты. Используйте формат ГГГГ-ММ-ДД."))
-			return
-		}
+			// Используем тот же формат, что и в parseCustomPeriod - "02.01.2006"
+			layout := "02.01.2006"
+			var err error
 
-		startDate = parsedStartDate
-		endDate = parsedEndDate
+			startDate, err = time.Parse(layout, startDateStr)
+			if err != nil {
+				log.Printf("Ошибка парсинга начальной даты: %v", err)
+				b.api.Send(tgbotapi.NewMessage(chatID, fmt.Sprintf("Неверный формат начальной даты: %v. Используйте формат ДД.ММ.ГГГГ.", err)))
+				return
+			}
 
-		if startDate.After(endDate) {
-			b.api.Send(tgbotapi.NewMessage(chatID, "Начальная дата не может быть позже конечной даты."))
+			endDate, err = time.Parse(layout, endDateStr)
+			if err != nil {
+				log.Printf("Ошибка парсинга конечной даты: %v", err)
+				b.api.Send(tgbotapi.NewMessage(chatID, fmt.Sprintf("Неверный формат конечной даты: %v. Используйте формат ДД.ММ.ГГГГ.", err)))
+				return
+			}
+
+			if startDate.After(endDate) {
+				b.api.Send(tgbotapi.NewMessage(chatID, "Начальная дата не может быть позже конечной даты."))
+				return
+			}
+		} else {
+			b.api.Send(tgbotapi.NewMessage(chatID, "Неизвестный период. Пожалуйста, выберите корректный период."))
 			return
 		}
 	}
