@@ -43,6 +43,7 @@ services:
       - SMTP_PORT=1025     # Стандартный SMTP порт MailHog
       - SMTP_USER=""       # MailHog не требует авторизации
       - SMTP_PASSWORD=""   # MailHog не требует авторизации
+      - SMTP_SSL=false
 
   # База данных для второго приложения
   db-second:
@@ -87,6 +88,8 @@ services:
       - SMTP_PORT=1025     # Стандартный SMTP порт MailHog
       - SMTP_USER=""       # MailHog не требует авторизации
       - SMTP_PASSWORD=""   # MailHog не требует авторизации
+      - SMTP_SSL=false
+
   mailhog:
     image: mailhog/mailhog:latest
     ports:

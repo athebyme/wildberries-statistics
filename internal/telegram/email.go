@@ -132,8 +132,10 @@ func (b *Bot) sendEmail(to string, reportType string, period string, filePath st
 	// Отправляем сообщение
 	d := gomail.NewDialer(smtpHost, smtpPort, smtpUser, smtpPassword)
 
-	// Используем TLS по умолчанию для портов отличных от 25
-	if smtpPort != 25 {
+	smtpSSLStr := os.Getenv("SMTP_SSL")
+	smtpSSL := smtpSSLStr != "false"
+
+	if smtpSSL && smtpPort != 25 {
 		d.SSL = true
 	}
 
