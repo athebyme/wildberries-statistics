@@ -170,9 +170,9 @@ func (m *MonitoringService) ProcessNomenclature(ctx context.Context, nomenclatur
 // RunMonitoring запускает основной цикл мониторинга.
 func (m *MonitoringService) RunMonitoring(ctx context.Context) error {
 	// Отправляем приветственное сообщение
-	if err := m.telegramBot.SendTelegramAlert("🔄 Сервис мониторинга запущен"); err != nil {
-		log.Printf("Failed to send welcome message: %v", err)
-	}
+	//if err := m.telegramBot.SendTelegramAlert("🔄 Сервис мониторинга запущен"); err != nil {
+	//	log.Printf("Failed to send welcome message: %v", err)
+	//}
 
 	// Запускаем бота в отдельной горутине
 	go m.telegramBot.StartBot(ctx)

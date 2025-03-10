@@ -1619,12 +1619,12 @@ func (b *Bot) generateReportFile(reportType, period, format string) (filePath, r
 		startDateStr, endDateStr := parts[1], parts[2]
 
 		// Парсим даты из кастомного периода
-		startDate, err = time.ParseInLocation("20060102", startDateStr, now.Location())
+		startDate, err = time.ParseInLocation("02-01-2006", startDateStr, now.Location())
 		if err != nil {
 			return "", "", fmt.Errorf("ошибка парсинга начальной даты: %v", err)
 		}
 
-		endDate, err = time.ParseInLocation("20060102", endDateStr, now.Location())
+		endDate, err = time.ParseInLocation("02-01-2006", endDateStr, now.Location())
 		if err != nil {
 			return "", "", fmt.Errorf("ошибка парсинга конечной даты: %v", err)
 		}
@@ -1649,7 +1649,7 @@ func (b *Bot) generateReportFile(reportType, period, format string) (filePath, r
 
 	// Добавляем логирование для отладки
 	log.Printf("Генерация отчета типа=%s, период=%s, формат=%s, startDate=%s, endDate=%s",
-		reportType, period, format, startDate.Format("2006-01-02"), endDate.Format("2006-01-02"))
+		reportType, period, format, startDate.Format("02-01-2006"), endDate.Format("02-01-2006"))
 
 	// Генерация отчёта в зависимости от типа и формата
 	switch reportType {
