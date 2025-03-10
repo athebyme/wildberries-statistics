@@ -332,6 +332,7 @@ func (b *Bot) generateReport(chatID int64, reportType, period, format string) {
 		endDate = now
 	}
 	if strings.Contains(period, "custom") {
+		log.Printf(period)
 		parts := strings.Split(period, "_")
 		if len(parts) != 3 {
 			b.api.Send(tgbotapi.NewMessage(chatID, "Неверный формат произвольного периода. Пожалуйста, попробуйте еще раз."))

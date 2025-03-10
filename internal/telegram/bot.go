@@ -341,7 +341,7 @@ func (b *Bot) parseCustomPeriod(periodStr string) (startDate, endDate time.Time,
 	}
 
 	// Парсим даты
-	layout := "02.01.2006"
+	layout := "31.01.2006"
 	startDate, err = time.Parse(layout, strings.TrimSpace(dates[0]))
 	if err != nil {
 		return time.Time{}, time.Time{}, fmt.Errorf("неверный формат даты начала: %v", err)
