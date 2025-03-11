@@ -123,7 +123,7 @@ func (b *Bot) sendEmail(to string, reportType string, period string, filePath st
 	d := mail.NewDialer(smtpHost, smtpPort, "", "")
 
 	// Критически важно: отключаем SSL и StartTLS для MailHog
-	d.SSL = true
+	d.SSL = false
 	d.TLSConfig = nil
 	d.StartTLSPolicy = mail.MandatoryStartTLS
 
