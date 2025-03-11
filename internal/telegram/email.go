@@ -54,7 +54,6 @@ func (b *Bot) saveUserEmail(userID int64, email string) error {
 	if err != nil {
 		return err
 	}
-
 	if count == 0 {
 		// Если записи нет, создаем новую
 		_, err = b.db.Exec(
@@ -124,9 +123,9 @@ func (b *Bot) sendEmail(to string, reportType string, period string, filePath st
 	d := mail.NewDialer(smtpHost, smtpPort, "", "")
 
 	// Критически важно: отключаем SSL и StartTLS для MailHog
-	d.SSL = false
+	d.SSL = true
 	d.TLSConfig = nil
-	d.StartTLSPolicy = mail.NoStartTLS
+	d.StartTLSPolicy = mail.MandatoryStartTLS
 
 	// Добавляем логирование перед отправкой
 	log.Printf("Отправка email на %s через SMTP сервер %s:%d", to, smtpHost, smtpPort)
