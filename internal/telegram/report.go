@@ -657,12 +657,18 @@ func (b *Bot) generatePriceReportExcel(chatID int64, startDate, endDate time.Tim
 
 	resultChan := make(chan ProductResult, len(products))
 	var processWg sync.WaitGroup
+	workerLimit := 10
+	sem := make(chan struct{}, workerLimit)
 
 	// Обрабатываем товары параллельно
 	for _, product := range products {
+		sem <- struct{}{}
 		processWg.Add(1)
 		go func(prod models.ProductRecord) {
-			defer processWg.Done()
+			defer func() {
+				processWg.Done()
+				<-sem
+			}()
 
 			// Получаем историю цен для товара за период
 			prices, err := db.GetPricesForPeriod(ctx, b.db, prod.ID, startDate, endDate)
