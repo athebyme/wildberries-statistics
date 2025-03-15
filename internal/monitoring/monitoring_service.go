@@ -63,11 +63,11 @@ func NewMonitoringService(cfg config.Config) (*MonitoringService, error) {
 		ApiKey:         cfg.ApiKey, // Передаем API ключ
 	}
 
-	cleanupSvc := NewRecordCleanupService(
-		database,
-		24*time.Hour,    // Запускаем очистку раз в сутки
-		30*24*time.Hour, // Храним данные за 30 дней
-	)
+	//cleanupSvc := NewRecordCleanupService(
+	//	database,
+	//	24*time.Hour,    // Запускаем очистку раз в сутки
+	//	30*24*time.Hour, // Храним данные за 30 дней
+	//)
 
 	searchEngine := search.NewSearchEngine(database.DB, os.Stdout, searchConfig) // Используем db.DB, так как SearchEngine ожидает *sql.DB
 	client := http.Client{Timeout: cfg.RequestTimeout}
@@ -78,9 +78,9 @@ func NewMonitoringService(cfg config.Config) (*MonitoringService, error) {
 		stocksLimiter:    rate.NewLimiter(rate.Every(time.Minute/300), 10), // 300 запросов в минуту
 		warehouseLimiter: rate.NewLimiter(rate.Every(time.Minute/300), 10), // 300 запросов в минуту
 		telegramBot:      telegramBot,
-		recordCleanupSvc: cleanupSvc,
-		searchEngine:     searchEngine, // Инициализируем SearchEngine
-		httpClient:       &client,
+		//recordCleanupSvc: cleanupSvc,
+		searchEngine: searchEngine, // Инициализируем SearchEngine
+		httpClient:   &client,
 	}, nil
 }
 
@@ -178,7 +178,7 @@ func (m *MonitoringService) RunMonitoring(ctx context.Context) error {
 	go m.telegramBot.StartBot(ctx)
 
 	// Запускаем сервис очистки записей
-	go m.recordCleanupSvc.RunCleanupProcess(ctx)
+	//go m.recordCleanupSvc.RunCleanupProcess(ctx)
 
 	go func() {
 		err := m.UpdateWarehouses(ctx)

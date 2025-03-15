@@ -24,7 +24,7 @@ func NewRecordCleanupService(db *sqlx.DB, cleanupInterval, retentionInterval tim
 		db:                db,
 		cleanupInterval:   cleanupInterval,
 		retentionInterval: retentionInterval,
-		hourlyDataKeeper:  NewHourlyDataKeeper(db),
+		//hourlyDataKeeper:  NewHourlyDataKeeper(db),
 	}
 }
 
@@ -165,7 +165,7 @@ func (s *RecordCleanupService) processProductPrices(ctx context.Context, product
 						productID, sizeID, hour, err)
 				} else if !exists {
 					// Сохраняем почасовой снимок, только если его еще нет
-					err = s.hourlyDataKeeper.SaveHourlyPriceData(ctx, productID, sizeID, hourStart, priceRecords)
+					//err = s.hourlyDataKeeper.SaveHourlyPriceData(ctx, productID, sizeID, hourStart, priceRecords)
 					if err != nil {
 						log.Printf("Error saving hourly price data for hour %d, product %d, size %d: %v",
 							hour, productID, sizeID, err)
@@ -247,7 +247,7 @@ func (s *RecordCleanupService) processProductStocks(ctx context.Context, product
 						productID, warehouseID, hour, err)
 				} else if !exists {
 					// Сохраняем почасовой снимок, только если его еще нет
-					err = s.hourlyDataKeeper.SaveHourlyStockData(ctx, productID, warehouseID, hourStart, stockRecords)
+					//err = s.hourlyDataKeeper.saveStockSnapshot(ctx, productID, warehouseID, hourStart, stockRecords)
 					if err != nil {
 						log.Printf("Error saving hourly stock data for hour %d, product %d, warehouse %d: %v",
 							hour, productID, warehouseID, err)
