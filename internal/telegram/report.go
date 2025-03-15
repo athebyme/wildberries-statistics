@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"wbmonitoring/monitoring/internal/db"
 	"wbmonitoring/monitoring/internal/models"
@@ -47,11 +48,11 @@ func addDynamicChangesSheet(
 	var headers []string
 	if isPriceReport {
 		headers = []string{
-			"Товар", "Артикул", "Дата", "Цена (₽)", "Изменение (₽)", "Изменение (%)",
+			"Товар", "Артикул", "Дата", "Цена до (₽)", "Цена после (₽)", "Изменение (₽)", "Изменение (%)", "Скидка МП (%)",
 		}
 	} else {
 		headers = []string{
-			"Товар", "Артикул", "Склад", "Дата", "Остаток (шт.)", "Изменение (шт.)", "Изменение (%)",
+			"Товар", "Артикул", "Склад", "Дата", "Остаток до (шт.)", "Остаток после (шт.)", "Изменение (шт.)", "Изменение (%)",
 		}
 	}
 
@@ -78,159 +79,232 @@ func addDynamicChangesSheet(
 	row := 2
 	productsAdded := 0
 
+	// Для параллельной обработки
+	var wg sync.WaitGroup
+	var _ sync.Mutex // Для безопасного доступа к Excel-файлу
+
+	// Канал для результатов
+	type processResult struct {
+		rows         [][]interface{}
+		productAdded bool
+	}
+	resultChan := make(chan processResult, len(products))
+
 	// Для отчета по остаткам - обрабатываем каждый склад отдельно
 	if isPriceReport {
-		// Обрабатываем цены
+		// Обрабатываем цены параллельно
 		for _, product := range products {
-			// Получаем все цены за период
-			prices, err := db.GetPricesForPeriod(ctx, database, product.ID, startDate, endDate)
-			if err != nil {
-				log.Printf("Error getting prices for product %d: %v", product.ID, err)
-				continue
-			}
+			wg.Add(1)
+			go func(prod models.ProductRecord) {
+				defer wg.Done()
 
-			if len(prices) < 2 {
-				continue // Нужно минимум 2 записи для отслеживания изменений
-			}
-
-			// Проверяем, есть ли существенные изменения
-			firstPrice := prices[0].FinalPrice
-			lastPrice := prices[len(prices)-1].FinalPrice
-			totalChangePercent := 0.0
-			if firstPrice > 0 {
-				totalChangePercent = float64(lastPrice-firstPrice) / float64(firstPrice) * 100
-			}
-
-			// Проверяем, превышает ли изменение пороговое значение
-			if math.Abs(totalChangePercent) < config.MinPriceChangePercent {
-				continue
-			}
-
-			// Добавляем товар в отчет динамики
-			var prevPrice int
-			var firstEntryForProduct bool = true
-
-			for i, price := range prices {
-				// Пропускаем первую запись для расчета изменений
-				if i == 0 {
-					prevPrice = price.FinalPrice
-					continue
-				}
-
-				// Рассчитываем изменение по сравнению с предыдущей записью
-				priceChange := price.FinalPrice - prevPrice
-				changePercent := 0.0
-				if prevPrice > 0 {
-					changePercent = float64((priceChange / prevPrice) * 100)
-				}
-
-				// Добавляем только если есть изменение цены
-				if priceChange != 0 {
-					// Если это первая запись для данного товара, добавляем имя и артикул
-					if firstEntryForProduct {
-						f.SetCellValue(sheetName, fmt.Sprintf("A%d", row), product.Name)
-						f.SetCellValue(sheetName, fmt.Sprintf("B%d", row), product.VendorCode)
-						firstEntryForProduct = false
-						productsAdded++
-					} else {
-						// Для последующих записей оставляем пустыми ячейки имени и артикула
-						f.SetCellValue(sheetName, fmt.Sprintf("A%d", row), "")
-						f.SetCellValue(sheetName, fmt.Sprintf("B%d", row), "")
-					}
-
-					f.SetCellValue(sheetName, fmt.Sprintf("C%d", row), price.RecordedAt.Format("02.01.2006 15:04"))
-					f.SetCellValue(sheetName, fmt.Sprintf("D%d", row), price.FinalPrice)
-					f.SetCellValue(sheetName, fmt.Sprintf("E%d", row), float64(priceChange)/100)
-					f.SetCellValue(sheetName, fmt.Sprintf("F%d", row), changePercent)
-
-					row++
-				}
-
-				prevPrice = price.FinalPrice
-			}
-		}
-	} else {
-		// Обрабатываем остатки для каждого товара по каждому складу
-		for _, product := range products {
-			for _, warehouse := range warehouses {
-				// Получаем историю остатков
-				stocks, err := db.GetStocksForPeriod(ctx, database, product.ID, warehouse.ID, startDate, endDate)
+				// Получаем все цены за период
+				prices, err := db.GetPricesForPeriod(ctx, database, prod.ID, startDate, endDate)
 				if err != nil {
-					log.Printf("Error getting stocks for product %d on warehouse %d: %v",
-						product.ID, warehouse.ID, err)
-					continue
+					log.Printf("Error getting prices for product %d: %v", prod.ID, err)
+					return
 				}
 
-				if len(stocks) < 2 {
-					continue // Нужно минимум 2 записи для отслеживания изменений
+				if len(prices) < 2 {
+					return // Нужно минимум 2 записи для отслеживания изменений
 				}
 
 				// Проверяем, есть ли существенные изменения
-				firstStock := stocks[0].Amount
-				lastStock := stocks[len(stocks)-1].Amount
+				firstPrice := prices[0].FinalPrice
+				lastPrice := prices[len(prices)-1].FinalPrice
 				totalChangePercent := 0.0
-				if firstStock > 0 {
-					totalChangePercent = float64(lastStock-firstStock) / float64(firstStock) * 100
-				} else if firstStock == 0 && lastStock > 0 {
-					// Если начальный остаток был 0, а теперь есть товары - это значительное изменение
-					totalChangePercent = 100.0
+				if firstPrice > 0 {
+					totalChangePercent = float64(lastPrice-firstPrice) / float64(firstPrice) * 100
 				}
 
 				// Проверяем, превышает ли изменение пороговое значение
-				if math.Abs(totalChangePercent) < config.MinStockChangePercent {
-					continue
+				if math.Abs(totalChangePercent) < config.MinPriceChangePercent {
+					return
 				}
 
-				// Добавляем товар в отчет динамики
-				var prevStock int
-				var firstEntryForProduct bool = true
+				// Подготовка данных для отчета
+				var rows [][]interface{}
+				firstEntryForProduct := true
 
-				for i, stock := range stocks {
-					// Пропускаем первую запись для расчета изменений
-					if i == 0 {
-						prevStock = stock.Amount
-						continue
-					}
+				for i := 1; i < len(prices); i++ {
+					prevPrice := prices[i-1].FinalPrice
+					currPrice := prices[i].FinalPrice
 
-					// Рассчитываем изменение по сравнению с предыдущей записью
-					stockChange := stock.Amount - prevStock
-					changePercent := 0.0
-					if prevStock > 0 {
-						changePercent = float64(stockChange) / float64(prevStock) * 100
-					} else if prevStock == 0 && stock.Amount > 0 {
-						changePercent = 100.0
-					}
+					// Рассчитываем изменение цены
+					priceChange := currPrice - prevPrice
 
-					// Добавляем только если есть изменение остатка
-					if stockChange != 0 {
-						// Если это первая запись для данного товара, добавляем имя и артикул
-						if firstEntryForProduct {
-							f.SetCellValue(sheetName, fmt.Sprintf("A%d", row), product.Name)
-							f.SetCellValue(sheetName, fmt.Sprintf("B%d", row), product.VendorCode)
-							f.SetCellValue(sheetName, fmt.Sprintf("C%d", row), warehouse.Name)
-							firstEntryForProduct = false
-							productsAdded++
-						} else {
-							// Для последующих записей оставляем пустыми ячейки имени и артикула
-							f.SetCellValue(sheetName, fmt.Sprintf("A%d", row), "")
-							f.SetCellValue(sheetName, fmt.Sprintf("B%d", row), "")
-							f.SetCellValue(sheetName, fmt.Sprintf("C%d", row), "")
+					// Добавляем только если есть изменение цены или это первая запись
+					if priceChange != 0 || i == 1 {
+						// Расчет процента изменения
+						changePercent := 0.0
+						if prevPrice > 0 {
+							changePercent = float64(priceChange) / float64(prevPrice) * 100
 						}
 
-						f.SetCellValue(sheetName, fmt.Sprintf("D%d", row), stock.RecordedAt.Format("02.01.2006 15:04"))
-						f.SetCellValue(sheetName, fmt.Sprintf("E%d", row), stock.Amount)
-						f.SetCellValue(sheetName, fmt.Sprintf("F%d", row), stockChange)
-						f.SetCellValue(sheetName, fmt.Sprintf("G%d", row), changePercent)
+						// Расчет скидки маркетплейса
+						marketplaceDiscount := 0.0
+						if prices[i].Price > 0 {
+							marketplaceDiscount = float64(prices[i].FinalPrice) / float64(prices[i].Price) * 100
+						}
 
-						row++
+						// Формируем строку для отчета
+						row := make([]interface{}, 8) // 8 колонок
+
+						// Если это первая запись для данного товара, добавляем имя и артикул
+						if firstEntryForProduct {
+							row[0] = prod.Name
+							row[1] = prod.VendorCode
+							firstEntryForProduct = false
+						} else {
+							row[0] = ""
+							row[1] = ""
+						}
+
+						row[2] = prices[i].RecordedAt.Format("02.01.2006 15:04")
+						row[3] = prevPrice
+						row[4] = currPrice
+						row[5] = priceChange
+						row[6] = changePercent
+						row[7] = marketplaceDiscount
+
+						rows = append(rows, row)
+					}
+				}
+
+				if len(rows) > 0 {
+					resultChan <- processResult{rows: rows, productAdded: true}
+				}
+			}(product)
+		}
+	} else {
+		// Обрабатываем остатки для каждого товара по каждому складу параллельно
+		for _, product := range products {
+			for _, warehouse := range warehouses {
+				wg.Add(1)
+				go func(prod models.ProductRecord, wh models.Warehouse) {
+					defer wg.Done()
+
+					// Получаем историю остатков
+					stocks, err := db.GetStocksForPeriod(ctx, database, prod.ID, wh.ID, startDate, endDate)
+					if err != nil {
+						log.Printf("Error getting stocks for product %d on warehouse %d: %v", prod.ID, wh.ID, err)
+						return
 					}
 
-					prevStock = stock.Amount
-				}
+					if len(stocks) < 2 {
+						return // Нужно минимум 2 записи для отслеживания изменений
+					}
+
+					// Проверяем, есть ли существенные изменения
+					firstStock := stocks[0].Amount
+					lastStock := stocks[len(stocks)-1].Amount
+					totalChangePercent := 0.0
+					if firstStock > 0 {
+						totalChangePercent = float64(lastStock-firstStock) / float64(firstStock) * 100
+					} else if firstStock == 0 && lastStock > 0 {
+						// Если начальный остаток был 0, а теперь есть товары - это значительное изменение
+						totalChangePercent = 100.0
+					}
+
+					// Проверяем, превышает ли изменение пороговое значение
+					if math.Abs(totalChangePercent) < config.MinStockChangePercent {
+						return
+					}
+
+					// Подготовка данных для отчета
+					var rows [][]interface{}
+					firstEntryForProduct := true
+
+					// Если товар попал в отчет, выводим ВСЕ изменения его остатков
+					for i := 1; i < len(stocks); i++ {
+						prevStock := stocks[i-1].Amount
+						currStock := stocks[i].Amount
+
+						// Рассчитываем изменение остатка
+						stockChange := currStock - prevStock
+
+						// Выводим ВСЕ записи для подозрительных товаров
+						// Расчет процента изменения
+						changePercent := 0.0
+						if prevStock > 0 {
+							changePercent = float64(stockChange) / float64(prevStock) * 100
+						} else if prevStock == 0 && currStock > 0 {
+							changePercent = 100.0
+						}
+
+						// Формируем строку для отчета
+						row := make([]interface{}, 8) // 8 колонок
+
+						// Если это первая запись для данного товара, добавляем имя и артикул
+						if firstEntryForProduct {
+							row[0] = prod.Name
+							row[1] = prod.VendorCode
+							row[2] = wh.Name
+							firstEntryForProduct = false
+						} else {
+							row[0] = ""
+							row[1] = ""
+							row[2] = ""
+						}
+
+						row[3] = stocks[i].RecordedAt.Format("02.01.2006 15:04")
+						row[4] = prevStock
+						row[5] = currStock
+						row[6] = stockChange
+						row[7] = changePercent
+
+						rows = append(rows, row)
+					}
+
+					if len(rows) > 0 {
+						resultChan <- processResult{rows: rows, productAdded: true}
+					}
+				}(product, warehouse)
 			}
 		}
 	}
 
+	// Ожидаем завершения всех горутин и закрываем канал с результатами
+	go func() {
+		wg.Wait()
+		close(resultChan)
+	}()
+
+	// Обрабатываем результаты
+	var allRows [][]interface{}
+	for result := range resultChan {
+		if result.productAdded {
+			productsAdded++
+			allRows = append(allRows, result.rows...)
+		}
+	}
+
+	// Сортируем строки по товару и дате для лучшей читаемости
+	sort.Slice(allRows, func(i, j int) bool {
+		// Сначала сортируем по имени товара (первая ячейка)
+		if allRows[i][0] != "" && allRows[j][0] != "" {
+			if allRows[i][0].(string) != allRows[j][0].(string) {
+				return allRows[i][0].(string) < allRows[j][0].(string)
+			}
+		}
+		// Если имена одинаковые или пустые, сортируем по дате
+		iDate := allRows[i][2].(string)
+		jDate := allRows[j][2].(string)
+		if !isPriceReport {
+			iDate = allRows[i][3].(string)
+			jDate = allRows[j][3].(string)
+		}
+		return iDate < jDate
+	})
+
+	// Записываем отсортированные данные в Excel
+	for _, rowData := range allRows {
+		for col, value := range rowData {
+			cell := fmt.Sprintf("%c%d", 'A'+col, row)
+			f.SetCellValue(sheetName, cell, value)
+		}
+		row++
+	}
 	// Если товаров с существенными изменениями не найдено
 	if productsAdded == 0 {
 		emptyRow := 3
@@ -252,31 +326,31 @@ func addDynamicChangesSheet(
 		}
 	}
 
-	// Устанавливаем стиль для чисел и процентов
+	// Устанавливаем стили для данных
 	if isPriceReport {
-		// Стиль для цен с двумя десятичными знаками
+		// Стиль для цен
 		numberStyle, _ := f.NewStyle(&excelize.Style{
 			NumFmt: 2, // Формат с двумя десятичными знаками
 		})
-		f.SetCellStyle(sheetName, "D2", fmt.Sprintf("E%d", row-1), numberStyle)
+		f.SetCellStyle(sheetName, "D2", fmt.Sprintf("F%d", row-1), numberStyle)
 
 		// Стиль для процентов
 		percentStyle, _ := f.NewStyle(&excelize.Style{
 			NumFmt: 10, // Процентный формат
 		})
-		f.SetCellStyle(sheetName, "F2", fmt.Sprintf("F%d", row-1), percentStyle)
+		f.SetCellStyle(sheetName, "G2", fmt.Sprintf("H%d", row-1), percentStyle)
 	} else {
 		// Стиль для целых чисел
 		numberStyle, _ := f.NewStyle(&excelize.Style{
 			NumFmt: 1, // Целое число
 		})
-		f.SetCellStyle(sheetName, "E2", fmt.Sprintf("F%d", row-1), numberStyle)
+		f.SetCellStyle(sheetName, "E2", fmt.Sprintf("G%d", row-1), numberStyle)
 
 		// Стиль для процентов
 		percentStyle, _ := f.NewStyle(&excelize.Style{
 			NumFmt: 10, // Процентный формат
 		})
-		f.SetCellStyle(sheetName, "G2", fmt.Sprintf("G%d", row-1), percentStyle)
+		f.SetCellStyle(sheetName, "H2", fmt.Sprintf("H%d", row-1), percentStyle)
 	}
 
 	// Добавим группировку по товарам (объединение строк одного товара визуально)
@@ -296,7 +370,6 @@ func addDynamicChangesSheet(
 				f.SetCellStyle(sheetName, "A"+strconv.Itoa(r-1), lastCol+strconv.Itoa(r-1), borderStyle)
 			}
 			currentProduct = productName
-
 		}
 	}
 
@@ -480,10 +553,58 @@ func (b *Bot) generatePriceReport(chatID int64, startDate, endDate time.Time) {
 func (b *Bot) generatePriceReportExcel(chatID int64, startDate, endDate time.Time, config ReportConfig) {
 	ctx := context.Background()
 
-	// Код остается тот же, как был раньше, до создания Excel файла
-	products, err := db.GetAllProducts(ctx, b.db)
-	if err != nil {
-		b.api.Send(tgbotapi.NewMessage(chatID, fmt.Sprintf("Ошибка при получении списка товаров: %v", err)))
+	// Отправляем сообщение о начале генерации отчета
+	b.api.Send(tgbotapi.NewMessage(chatID, "Генерация отчета начата. Это может занять некоторое время..."))
+
+	// Получаем товары параллельно с другими операциями
+	productsCh := make(chan []models.ProductRecord)
+	warehousesCh := make(chan []models.Warehouse)
+	var wg sync.WaitGroup
+
+	// Запускаем получение товаров асинхронно
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		products, err := db.GetAllProducts(ctx, b.db)
+		if err != nil {
+			log.Printf("Ошибка при получении списка товаров: %v", err)
+			productsCh <- nil
+			return
+		}
+		productsCh <- products
+	}()
+
+	// Запускаем получение складов асинхронно
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		warehouses, err := db.GetAllWarehouses(ctx, b.db)
+		if err != nil {
+			log.Printf("Ошибка при получении списка складов: %v", err)
+			warehousesCh <- nil
+			return
+		}
+		warehousesCh <- warehouses
+	}()
+
+	// Ожидаем завершения обоих запросов
+	go func() {
+		wg.Wait()
+		close(productsCh)
+		close(warehousesCh)
+	}()
+
+	// Получаем результаты
+	products := <-productsCh
+	warehouses := <-warehousesCh
+
+	if products == nil {
+		b.api.Send(tgbotapi.NewMessage(chatID, "Ошибка при получении списка товаров"))
+		return
+	}
+
+	if warehouses == nil {
+		b.api.Send(tgbotapi.NewMessage(chatID, "Ошибка при получении списка складов"))
 		return
 	}
 
@@ -521,53 +642,105 @@ func (b *Bot) generatePriceReportExcel(chatID int64, startDate, endDate time.Tim
 	})
 	f.SetCellStyle(sheetName, "A1", string(rune('A'+len(headers)-1))+"1", headerStyle)
 
+	// Структура для результатов обработки товаров
+	type ProductResult struct {
+		ProductName   string
+		VendorCode    string
+		FirstPrice    int
+		LastPrice     int
+		PriceChange   int
+		ChangePercent float64
+		MinPrice      int
+		MaxPrice      int
+		RecordsCount  int
+	}
+
+	resultChan := make(chan ProductResult, len(products))
+	var processWg sync.WaitGroup
+
+	// Обрабатываем товары параллельно
+	for _, product := range products {
+		processWg.Add(1)
+		go func(prod models.ProductRecord) {
+			defer processWg.Done()
+
+			// Получаем историю цен для товара за период
+			prices, err := db.GetPricesForPeriod(ctx, b.db, prod.ID, startDate, endDate)
+			if err != nil {
+				log.Printf("Error getting prices for product %d: %v", prod.ID, err)
+				return
+			}
+
+			if len(prices) == 0 {
+				return
+			}
+
+			// Находим максимальную и минимальную цену за период
+			firstPrice := prices[0].FinalPrice
+			lastPrice := prices[len(prices)-1].FinalPrice
+			minPrice := firstPrice
+			maxPrice := firstPrice
+
+			for _, price := range prices {
+				if price.FinalPrice < minPrice {
+					minPrice = price.FinalPrice
+				}
+				if price.FinalPrice > maxPrice {
+					maxPrice = price.FinalPrice
+				}
+			}
+
+			// Рассчитываем изменение цены за период
+			priceChange := lastPrice - firstPrice
+			priceChangePercent := float64(0)
+			if firstPrice > 0 {
+				priceChangePercent = float64(priceChange) / float64(firstPrice) * 100
+			}
+
+			// Отправляем результат
+			resultChan <- ProductResult{
+				ProductName:   prod.Name,
+				VendorCode:    prod.VendorCode,
+				FirstPrice:    firstPrice,
+				LastPrice:     lastPrice,
+				PriceChange:   priceChange,
+				ChangePercent: priceChangePercent,
+				MinPrice:      minPrice,
+				MaxPrice:      maxPrice,
+				RecordsCount:  len(prices),
+			}
+		}(product)
+	}
+
+	// Ожидаем завершения всех горутин и закрываем канал
+	go func() {
+		processWg.Wait()
+		close(resultChan)
+	}()
+
+	// Собираем и сортируем результаты
+	var results []ProductResult
+	for result := range resultChan {
+		results = append(results, result)
+	}
+
+	// Сортируем по имени товара для улучшения читаемости
+	sort.Slice(results, func(i, j int) bool {
+		return results[i].ProductName < results[j].ProductName
+	})
+
 	// Заполняем данные
 	row := 2
-	for _, product := range products {
-		// Получаем историю цен для товара за период
-		prices, err := db.GetPricesForPeriod(ctx, b.db, product.ID, startDate, endDate)
-		if err != nil {
-			log.Printf("Error getting prices for product %d: %v", product.ID, err)
-			continue
-		}
-
-		if len(prices) == 0 {
-			continue
-		}
-
-		// Находим максимальную и минимальную цену за период
-		var minPrice, maxPrice, firstPrice, lastPrice int
-		firstPrice = prices[0].FinalPrice
-		lastPrice = prices[len(prices)-1].FinalPrice
-		minPrice = firstPrice
-		maxPrice = firstPrice
-
-		for _, price := range prices {
-			if price.FinalPrice < minPrice {
-				minPrice = price.FinalPrice
-			}
-			if price.FinalPrice > maxPrice {
-				maxPrice = price.FinalPrice
-			}
-		}
-
-		// Рассчитываем изменение цены за период
-		priceChange := lastPrice - firstPrice
-		priceChangePercent := float64(0)
-		if firstPrice > 0 {
-			priceChangePercent = float64(priceChange) / float64(firstPrice) * 100
-		}
-
-		// Добавляем данные в Excel
-		f.SetCellValue(sheetName, fmt.Sprintf("A%d", row), product.Name)
-		f.SetCellValue(sheetName, fmt.Sprintf("B%d", row), product.VendorCode)
-		f.SetCellValue(sheetName, fmt.Sprintf("C%d", row), firstPrice)
-		f.SetCellValue(sheetName, fmt.Sprintf("D%d", row), lastPrice)
-		f.SetCellValue(sheetName, fmt.Sprintf("E%d", row), float64(priceChange))
-		f.SetCellValue(sheetName, fmt.Sprintf("F%d", row), priceChangePercent)
-		f.SetCellValue(sheetName, fmt.Sprintf("G%d", row), minPrice)
-		f.SetCellValue(sheetName, fmt.Sprintf("H%d", row), maxPrice)
-		f.SetCellValue(sheetName, fmt.Sprintf("I%d", row), len(prices))
+	for _, result := range results {
+		f.SetCellValue(sheetName, fmt.Sprintf("A%d", row), result.ProductName)
+		f.SetCellValue(sheetName, fmt.Sprintf("B%d", row), result.VendorCode)
+		f.SetCellValue(sheetName, fmt.Sprintf("C%d", row), result.FirstPrice)
+		f.SetCellValue(sheetName, fmt.Sprintf("D%d", row), result.LastPrice)
+		f.SetCellValue(sheetName, fmt.Sprintf("E%d", row), result.PriceChange)
+		f.SetCellValue(sheetName, fmt.Sprintf("F%d", row), result.ChangePercent)
+		f.SetCellValue(sheetName, fmt.Sprintf("G%d", row), result.MinPrice)
+		f.SetCellValue(sheetName, fmt.Sprintf("H%d", row), result.MaxPrice)
+		f.SetCellValue(sheetName, fmt.Sprintf("I%d", row), result.RecordsCount)
 
 		row++
 	}
@@ -587,8 +760,13 @@ func (b *Bot) generatePriceReportExcel(chatID int64, startDate, endDate time.Tim
 	})
 	f.SetCellStyle(sheetName, "C2", fmt.Sprintf("H%d", row-1), numberStyle)
 
-	warehouses, _ := db.GetAllWarehouses(ctx, b.db) // Получаем список складов для совместимости с функцией
-	err = addDynamicChangesSheet(f, products, ctx, b.db, startDate, endDate, true, config, warehouses)
+	// Стиль для процентов
+	percentStyle, _ := f.NewStyle(&excelize.Style{
+		NumFmt: 10, // Процентный формат
+	})
+	f.SetCellStyle(sheetName, "F2", fmt.Sprintf("F%d", row-1), percentStyle)
+
+	err := addDynamicChangesSheet(f, products, ctx, b.db, startDate, endDate, true, config, warehouses)
 	if err != nil {
 		log.Printf("Error adding dynamic changes sheet: %v", err)
 	}
