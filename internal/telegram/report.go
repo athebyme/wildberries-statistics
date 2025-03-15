@@ -553,9 +553,6 @@ func (b *Bot) generatePriceReport(chatID int64, startDate, endDate time.Time) {
 func (b *Bot) generatePriceReportExcel(chatID int64, startDate, endDate time.Time, config ReportConfig) {
 	ctx := context.Background()
 
-	// Отправляем сообщение о начале генерации отчета
-	b.api.Send(tgbotapi.NewMessage(chatID, "Генерация отчета начата. Это может занять некоторое время..."))
-
 	// Получаем товары параллельно с другими операциями
 	productsCh := make(chan []models.ProductRecord)
 	warehousesCh := make(chan []models.Warehouse)

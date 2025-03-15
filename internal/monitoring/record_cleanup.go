@@ -69,6 +69,8 @@ func (s *RecordCleanupService) CleanupRecords(ctx context.Context) error {
 		return fmt.Errorf("getting products for cleanup: %w", err)
 	}
 
+	log.Printf("Found %d products to process", len(products))
+
 	// Для каждого товара очищаем и систематизируем записи
 	for _, product := range products {
 		// Обрабатываем цены
@@ -90,11 +92,6 @@ func (s *RecordCleanupService) CleanupRecords(ctx context.Context) error {
 		return fmt.Errorf("deleting old records: %w", err)
 	}
 
-	// Удаляем старые почасовые данные
-	if err := s.hourlyDataKeeper.DeleteOldHourlyData(ctx, retentionDate); err != nil {
-		return fmt.Errorf("deleting old hourly data: %w", err)
-	}
-
 	log.Println("Records cleanup process completed")
 	return nil
 }
@@ -107,6 +104,12 @@ func (s *RecordCleanupService) processProductPrices(ctx context.Context, product
 		return fmt.Errorf("getting product sizes: %w", err)
 	}
 
+	if len(sizes) == 0 {
+		return nil // Нет размеров для обработки
+	}
+
+	log.Printf("Processing prices for product %d with %d sizes", productID, len(sizes))
+
 	// Обрабатываем записи для каждого размера отдельно
 	for _, sizeID := range sizes {
 		// Получаем последнюю известную цену до начала обрабатываемого периода
@@ -114,9 +117,10 @@ func (s *RecordCleanupService) processProductPrices(ctx context.Context, product
 		if err != nil {
 			log.Printf("Error getting last known price for product %d, size %d: %v",
 				productID, sizeID, err)
+			continue
 		}
 
-		// Получаем почасовые записи о ценах
+		// Обрабатываем каждый час дня
 		for hour := 0; hour < 24; hour++ {
 			hourStart := time.Date(startDate.Year(), startDate.Month(), startDate.Day(), hour, 0, 0, 0, startDate.Location())
 			hourEnd := hourStart.Add(time.Hour)
@@ -130,13 +134,23 @@ func (s *RecordCleanupService) processProductPrices(ctx context.Context, product
 			}
 
 			// Если нет записей за этот час, но есть предыдущая известная цена, создаем запись
-			if len(priceRecords) == 0 && lastKnownPrice != nil {
-				// Создаем копию последней известной цены с новым временем
-				hourlyRecord := *lastKnownPrice
-				hourlyRecord.RecordedAt = hourStart
-				hourlyRecord.ID = 0 // Сбрасываем ID, так как это новая запись
+			if len(priceRecords) == 0 {
+				if lastKnownPrice != nil {
+					// Создаем копию последней известной цены с новым временем
+					hourlyRecord := *lastKnownPrice
+					hourlyRecord.RecordedAt = hourStart
+					hourlyRecord.ID = 0 // Сбрасываем ID, так как это новая запись
 
-				priceRecords = append(priceRecords, hourlyRecord)
+					// Добавляем запись в базу данных
+					newID, err := s.insertPriceRecord(ctx, &hourlyRecord)
+					if err != nil {
+						log.Printf("Error inserting hourly price record for product %d, size %d, hour %d: %v",
+							productID, sizeID, hour, err)
+					} else {
+						hourlyRecord.ID = newID
+						priceRecords = append(priceRecords, hourlyRecord)
+					}
+				}
 			} else if len(priceRecords) > 0 {
 				// Если есть записи за этот час, обновляем последнюю известную цену
 				lastKnownPrice = &priceRecords[len(priceRecords)-1]
@@ -144,10 +158,18 @@ func (s *RecordCleanupService) processProductPrices(ctx context.Context, product
 
 			// Сохраняем почасовой снимок и все изменения
 			if len(priceRecords) > 0 {
-				err = s.hourlyDataKeeper.SaveHourlyPriceData(ctx, productID, sizeID, hourStart, priceRecords)
+				// Проверяем, есть ли уже почасовой снимок
+				exists, err := s.hourlySnapshotExists(ctx, "hourly_prices", productID, sizeID, hourStart)
 				if err != nil {
-					log.Printf("Error saving hourly price data for hour %d, product %d, size %d: %v",
-						hour, productID, sizeID, err)
+					log.Printf("Error checking hourly price snapshot for product %d, size %d, hour %d: %v",
+						productID, sizeID, hour, err)
+				} else if !exists {
+					// Сохраняем почасовой снимок, только если его еще нет
+					err = s.hourlyDataKeeper.SaveHourlyPriceData(ctx, productID, sizeID, hourStart, priceRecords)
+					if err != nil {
+						log.Printf("Error saving hourly price data for hour %d, product %d, size %d: %v",
+							hour, productID, sizeID, err)
+					}
 				}
 			}
 		}
@@ -164,6 +186,12 @@ func (s *RecordCleanupService) processProductStocks(ctx context.Context, product
 		return fmt.Errorf("getting product warehouses: %w", err)
 	}
 
+	if len(warehouses) == 0 {
+		return nil // Нет складов для обработки
+	}
+
+	log.Printf("Processing stocks for product %d with %d warehouses", productID, len(warehouses))
+
 	// Обрабатываем записи для каждого склада отдельно
 	for _, warehouseID := range warehouses {
 		// Получаем последний известный остаток до начала обрабатываемого периода
@@ -171,9 +199,10 @@ func (s *RecordCleanupService) processProductStocks(ctx context.Context, product
 		if err != nil {
 			log.Printf("Error getting last known stock for product %d, warehouse %d: %v",
 				productID, warehouseID, err)
+			continue
 		}
 
-		// Получаем почасовые записи об остатках
+		// Обрабатываем каждый час дня
 		for hour := 0; hour < 24; hour++ {
 			hourStart := time.Date(startDate.Year(), startDate.Month(), startDate.Day(), hour, 0, 0, 0, startDate.Location())
 			hourEnd := hourStart.Add(time.Hour)
@@ -187,13 +216,23 @@ func (s *RecordCleanupService) processProductStocks(ctx context.Context, product
 			}
 
 			// Если нет записей за этот час, но есть предыдущий известный остаток, создаем запись
-			if len(stockRecords) == 0 && lastKnownStock != nil {
-				// Создаем копию последнего известного остатка с новым временем
-				hourlyRecord := *lastKnownStock
-				hourlyRecord.RecordedAt = hourStart
-				hourlyRecord.ID = 0 // Сбрасываем ID, так как это новая запись
+			if len(stockRecords) == 0 {
+				if lastKnownStock != nil {
+					// Создаем копию последнего известного остатка с новым временем
+					hourlyRecord := *lastKnownStock
+					hourlyRecord.RecordedAt = hourStart
+					hourlyRecord.ID = 0 // Сбрасываем ID, так как это новая запись
 
-				stockRecords = append(stockRecords, hourlyRecord)
+					// Добавляем запись в базу данных
+					newID, err := s.insertStockRecord(ctx, &hourlyRecord)
+					if err != nil {
+						log.Printf("Error inserting hourly stock record for product %d, warehouse %d, hour %d: %v",
+							productID, warehouseID, hour, err)
+					} else {
+						hourlyRecord.ID = newID
+						stockRecords = append(stockRecords, hourlyRecord)
+					}
+				}
 			} else if len(stockRecords) > 0 {
 				// Если есть записи за этот час, обновляем последний известный остаток
 				lastKnownStock = &stockRecords[len(stockRecords)-1]
@@ -201,16 +240,100 @@ func (s *RecordCleanupService) processProductStocks(ctx context.Context, product
 
 			// Сохраняем почасовой снимок и все изменения
 			if len(stockRecords) > 0 {
-				err = s.hourlyDataKeeper.SaveHourlyStockData(ctx, productID, warehouseID, hourStart, stockRecords)
+				// Проверяем, есть ли уже почасовой снимок
+				exists, err := s.hourlySnapshotExists(ctx, "hourly_stocks", productID, int(warehouseID), hourStart)
 				if err != nil {
-					log.Printf("Error saving hourly stock data for hour %d, product %d, warehouse %d: %v",
-						hour, productID, warehouseID, err)
+					log.Printf("Error checking hourly stock snapshot for product %d, warehouse %d, hour %d: %v",
+						productID, warehouseID, hour, err)
+				} else if !exists {
+					// Сохраняем почасовой снимок, только если его еще нет
+					err = s.hourlyDataKeeper.SaveHourlyStockData(ctx, productID, warehouseID, hourStart, stockRecords)
+					if err != nil {
+						log.Printf("Error saving hourly stock data for hour %d, product %d, warehouse %d: %v",
+							hour, productID, warehouseID, err)
+					}
 				}
 			}
 		}
 	}
 
 	return nil
+}
+
+// hourlySnapshotExists проверяет, существует ли уже почасовой снимок
+func (s *RecordCleanupService) hourlySnapshotExists(ctx context.Context, tableName string, productID, itemID int, hour time.Time) (bool, error) {
+	var count int
+	var query string
+	var args []interface{}
+
+	if tableName == "hourly_prices" {
+		query = `SELECT COUNT(*) FROM hourly_prices WHERE product_id = $1 AND size_id = $2 AND hour = $3`
+		args = []interface{}{productID, itemID, hour}
+	} else if tableName == "hourly_stocks" {
+		query = `SELECT COUNT(*) FROM hourly_stocks WHERE product_id = $1 AND warehouse_id = $2 AND hour = $3`
+		args = []interface{}{productID, itemID, hour}
+	} else {
+		return false, fmt.Errorf("unknown table name: %s", tableName)
+	}
+
+	err := s.db.GetContext(ctx, &count, query, args...)
+	if err != nil {
+		return false, fmt.Errorf("checking hourly snapshot existence: %w", err)
+	}
+
+	return count > 0, nil
+}
+
+// insertPriceRecord вставляет запись о цене и возвращает её ID
+func (s *RecordCleanupService) insertPriceRecord(ctx context.Context, record *models.PriceRecord) (int, error) {
+	query := `
+        INSERT INTO prices (
+            product_id, size_id, price, discount, club_discount, 
+            final_price, club_final_price, currency_iso_code, 
+            tech_size_name, editable_size_price, recorded_at
+        ) VALUES (
+            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11
+        ) RETURNING id
+    `
+
+	var id int
+	err := s.db.QueryRowContext(
+		ctx,
+		query,
+		record.ProductID, record.SizeID, record.Price, record.Discount, record.ClubDiscount,
+		record.FinalPrice, record.ClubFinalPrice, record.CurrencyIsoCode,
+		record.TechSizeName, record.EditableSizePrice, record.RecordedAt,
+	).Scan(&id)
+
+	if err != nil {
+		return 0, fmt.Errorf("inserting price record: %w", err)
+	}
+
+	return id, nil
+}
+
+// insertStockRecord вставляет запись о складском остатке и возвращает её ID
+func (s *RecordCleanupService) insertStockRecord(ctx context.Context, record *models.StockRecord) (int, error) {
+	query := `
+        INSERT INTO stocks (
+            product_id, warehouse_id, amount, recorded_at
+        ) VALUES (
+            $1, $2, $3, $4
+        ) RETURNING id
+    `
+
+	var id int
+	err := s.db.QueryRowContext(
+		ctx,
+		query,
+		record.ProductID, record.WarehouseID, record.Amount, record.RecordedAt,
+	).Scan(&id)
+
+	if err != nil {
+		return 0, fmt.Errorf("inserting stock record: %w", err)
+	}
+
+	return id, nil
 }
 
 // getLastKnownPriceBefore возвращает последнюю известную цену до указанной даты

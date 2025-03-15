@@ -115,6 +115,42 @@ CREATE TABLE IF NOT EXISTS warehouses(
 CREATE INDEX IF NOT EXISTS idx_warehouses_name ON warehouses(name);
 CREATE INDEX IF NOT EXISTS idx_warehouses_wid ON warehouses(warehouse_id);
 CREATE INDEX IF NOT EXISTS idx_warehouses_id ON warehouses(id);
+
+
+-- Create the price_snapshots table
+CREATE TABLE IF NOT EXISTS price_snapshots (
+    id SERIAL PRIMARY KEY,
+    product_id INTEGER NOT NULL,
+    size_id INTEGER NOT NULL,
+    price INTEGER NOT NULL,
+    discount INTEGER NOT NULL,
+    club_discount INTEGER NOT NULL,
+    final_price INTEGER NOT NULL,
+    club_final_price INTEGER NOT NULL,
+    currency_iso_code TEXT NOT NULL,
+    tech_size_name TEXT NOT NULL,
+    editable_size_price BOOLEAN NOT NULL,
+    snapshot_time TIMESTAMP NOT NULL,
+    FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE CASCADE
+);
+
+-- Create index on product_id and snapshot_time for faster queries
+CREATE INDEX IF NOT EXISTS idx_price_snapshots_product_time ON price_snapshots(product_id, snapshot_time);
+
+-- Create the stock_snapshots table
+CREATE TABLE IF NOT EXISTS stock_snapshots (
+    id SERIAL PRIMARY KEY,
+    product_id INTEGER NOT NULL,
+    warehouse_id BIGINT NOT NULL,
+    amount INTEGER NOT NULL,
+    snapshot_time TIMESTAMP NOT NULL,
+    FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE CASCADE,
+    FOREIGN KEY (warehouse_id) REFERENCES warehouses(id) ON DELETE CASCADE
+);
+
+-- Create index on product_id, warehouse_id and snapshot_time for faster queries
+CREATE INDEX IF NOT EXISTS idx_stock_snapshots_product_warehouse_time 
+    ON stock_snapshots(product_id, warehouse_id, snapshot_time);
 `
 
 // InitDB initializes the database schema.

@@ -250,3 +250,28 @@ type Tag struct {
 	Name  string `json:"name"`
 	Color string `json:"color"`
 }
+
+// PriceSnapshot represents a hourly snapshot of price data
+type PriceSnapshot struct {
+	ID                int       `db:"id"`
+	ProductID         int       `db:"product_id"`
+	SizeID            int       `db:"size_id"`
+	Price             int       `db:"price"`
+	Discount          int       `db:"discount"`
+	ClubDiscount      int       `db:"club_discount"`
+	FinalPrice        int       `db:"final_price"`
+	ClubFinalPrice    int       `db:"club_final_price"`
+	CurrencyIsoCode   string    `db:"currency_iso_code"`
+	TechSizeName      string    `db:"tech_size_name"`
+	EditableSizePrice bool      `db:"editable_size_price"`
+	SnapshotTime      time.Time `db:"snapshot_time"`
+}
+
+// StockSnapshot represents a hourly snapshot of stock data
+type StockSnapshot struct {
+	ID           int       `db:"id"`
+	ProductID    int       `db:"product_id"`
+	WarehouseID  int64     `db:"warehouse_id"`
+	Amount       int       `db:"amount"`
+	SnapshotTime time.Time `db:"snapshot_time"`
+}
