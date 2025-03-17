@@ -12,7 +12,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -75,9 +74,6 @@ func addDynamicChangesSheet(
 	})
 	f.SetCellStyle(sheetName, "A1", string(rune('A'+len(headers)-1))+"1", headerStyle)
 
-	// Для параллельной обработки
-	var wg sync.WaitGroup
-
 	// Канал для результатов
 	type processResult struct {
 		rows         [][]interface{}
@@ -85,155 +81,89 @@ func addDynamicChangesSheet(
 	}
 	resultChan := make(chan processResult, len(products))
 
+	// Ограничиваем количество одновременных запросов к БД
+	maxConcurrentQueries := 10 // Регулируемый параметр - определяет максимальное количество одновременных запросов
+	dbSemaphore := make(chan struct{}, maxConcurrentQueries)
+
+	var wg sync.WaitGroup
+
+	// Функция для безопасного выполнения запроса к БД с повторными попытками
+	executeDBQuery := func(queryFunc func() (interface{}, error)) (interface{}, error) {
+		// Получаем доступ к семафору
+		dbSemaphore <- struct{}{}
+		defer func() {
+			// Освобождаем семафор после выполнения запроса
+			<-dbSemaphore
+		}()
+
+		var result interface{}
+		var err error
+		maxRetries := 3
+		retryDelay := 500 * time.Millisecond
+
+		for attempt := 0; attempt < maxRetries; attempt++ {
+			// Выполняем запрос
+			result, err = queryFunc()
+
+			// Если запрос успешен или ошибка не связана с "too many clients", возвращаем результат
+			if err == nil || !strings.Contains(err.Error(), "too many clients") {
+				return result, err
+			}
+
+			// Если "too many clients", ждем перед следующей попыткой с экспоненциальной задержкой
+			waitTime := retryDelay * time.Duration(attempt+1)
+			log.Printf("Retrying DB query after %v due to 'too many clients' error (attempt %d/%d)", waitTime, attempt+1, maxRetries)
+			time.Sleep(waitTime)
+		}
+
+		return nil, err
+	}
+
 	// Заполняем данные
 	row := 2
 	productsAdded := 0
 
 	if isPriceReport {
-		// Обрабатываем цены параллельно
-		for _, product := range products {
-			wg.Add(1)
-			go func(prod models.ProductRecord) {
-				defer wg.Done()
+		// Разбиваем продукты на пакеты для снижения нагрузки на БД
+		batchSize := 20
+		for i := 0; i < len(products); i += batchSize {
+			end := i + batchSize
+			if end > len(products) {
+				end = len(products)
+			}
+			productBatch := products[i:end]
 
-				// Получаем все цены за период
-				prices, err := db.GetPricesForPeriod(ctx, database, prod.ID, startDate, endDate)
-				if err != nil {
-					log.Printf("Error getting prices for product %d: %v", prod.ID, err)
-					return
-				}
-
-				if len(prices) < 2 {
-					return // Нужно минимум 2 записи для отслеживания изменений
-				}
-
-				// Проверяем, есть ли существенные изменения
-				firstPrice := prices[0].FinalPrice
-				lastPrice := prices[len(prices)-1].FinalPrice
-				totalChangePercent := 0.0
-				if firstPrice > 0 {
-					totalChangePercent = float64(lastPrice-firstPrice) / float64(firstPrice) * 100
-				}
-
-				// Проверяем, превышает ли изменение пороговое значение
-				if math.Abs(totalChangePercent) < config.MinPriceChangePercent {
-					return
-				}
-
-				// Подготовка данных для отчета
-				var rows [][]interface{}
-				firstEntryForProduct := true
-
-				// Оптимизированный алгоритм для объединения периодов без изменений
-				var periodStart time.Time = prices[0].RecordedAt
-				var currentPrice int = prices[0].FinalPrice
-				var currentOrigPrice int = prices[0].Price
-
-				for i := 1; i < len(prices); i++ {
-					// Если цена изменилась или это последняя запись
-					if prices[i].FinalPrice != currentPrice || i == len(prices)-1 {
-						// Если цена изменилась, добавляем запись о периоде
-
-						// Если это последняя запись и цена не изменилась, обновляем время окончания периода
-						periodEnd := prices[i-1].RecordedAt
-						if i == len(prices)-1 && prices[i].FinalPrice == currentPrice {
-							periodEnd = prices[i].RecordedAt
-						}
-
-						// Форматируем период как "01.02.2023 12:34 - 02.02.2023 15:45"
-						periodStr := periodStart.Format("02.01.2006 15:04")
-						if !periodStart.Equal(periodEnd) {
-							periodStr += " - " + periodEnd.Format("02.01.2006 15:04")
-						}
-
-						// Если следующая цена отличается, вычисляем изменение
-						nextPrice := prices[i].FinalPrice
-						priceChange := nextPrice - currentPrice
-
-						// Расчет процента изменения
-						changePercent := 0.0
-						if currentPrice > 0 {
-							changePercent = float64(priceChange) / float64(currentPrice) * 100
-						}
-
-						// Расчет скидки маркетплейса
-						marketplaceDiscount := 0.0
-						if currentOrigPrice > 0 {
-							marketplaceDiscount = float64(currentPrice) / float64(currentOrigPrice) * 100
-						}
-
-						// Формируем строку для отчета
-						row := make([]interface{}, 8) // 8 колонок
-
-						// Если это первая запись для данного товара, добавляем имя и артикул
-						if firstEntryForProduct {
-							row[0] = prod.Name
-							row[1] = prod.VendorCode
-							firstEntryForProduct = false
-						} else {
-							row[0] = ""
-							row[1] = ""
-						}
-
-						row[2] = periodStr
-						row[3] = currentPrice
-						row[4] = nextPrice
-						row[5] = priceChange
-						row[6] = changePercent
-						row[7] = marketplaceDiscount
-
-						// Добавляем строку только если есть изменение цены
-						if i < len(prices) && priceChange != 0 {
-							rows = append(rows, row)
-						} else if i == len(prices)-1 && len(rows) == 0 {
-							// Если это последняя запись и у нас еще нет строк (случай одной цены на весь период)
-							rows = append(rows, row)
-						}
-
-						// Обновляем значения для следующего периода
-						periodStart = prices[i].RecordedAt
-						currentPrice = prices[i].FinalPrice
-						currentOrigPrice = prices[i].Price
-					}
-				}
-
-				if len(rows) > 0 {
-					resultChan <- processResult{rows: rows, productAdded: true}
-				}
-			}(product)
-		}
-	} else {
-		// Обрабатываем остатки для каждого товара по каждому складу параллельно
-		for _, product := range products {
-			for _, warehouse := range warehouses {
+			// Обрабатываем каждый продукт в пакете
+			for _, product := range productBatch {
 				wg.Add(1)
-				go func(prod models.ProductRecord, wh models.Warehouse) {
+				go func(prod models.ProductRecord) {
 					defer wg.Done()
 
-					// Получаем историю остатков
-					stocks, err := db.GetStocksForPeriod(ctx, database, prod.ID, wh.ID, startDate, endDate)
+					// Безопасное получение цен из БД с повторными попытками
+					result, err := executeDBQuery(func() (interface{}, error) {
+						return db.GetPricesForPeriod(ctx, database, prod.ID, startDate, endDate)
+					})
+
 					if err != nil {
-						log.Printf("Error getting stocks for product %d on warehouse %d: %v", prod.ID, wh.ID, err)
+						log.Printf("Error getting prices for product %d after retries: %v", prod.ID, err)
 						return
 					}
 
-					if len(stocks) < 2 {
+					prices := result.([]models.PriceRecord)
+					if len(prices) < 2 {
 						return // Нужно минимум 2 записи для отслеживания изменений
 					}
 
 					// Проверяем, есть ли существенные изменения
-					firstStock := stocks[0].Amount
-					lastStock := stocks[len(stocks)-1].Amount
+					firstPrice := prices[0].FinalPrice
+					lastPrice := prices[len(prices)-1].FinalPrice
 					totalChangePercent := 0.0
-					if firstStock > 0 {
-						totalChangePercent = float64(lastStock-firstStock) / float64(firstStock) * 100
-					} else if firstStock == 0 && lastStock > 0 {
-						// Если начальный остаток был 0, а теперь есть товары - это значительное изменение
-						totalChangePercent = 100.0
+					if firstPrice > 0 {
+						totalChangePercent = float64(lastPrice-firstPrice) / float64(firstPrice) * 100
 					}
 
 					// Проверяем, превышает ли изменение пороговое значение
-					if math.Abs(totalChangePercent) < config.MinStockChangePercent {
+					if math.Abs(totalChangePercent) < config.MinPriceChangePercent {
 						return
 					}
 
@@ -241,37 +171,40 @@ func addDynamicChangesSheet(
 					var rows [][]interface{}
 					firstEntryForProduct := true
 
-					// Оптимизированный алгоритм для объединения периодов без изменений остатков
-					var periodStart time.Time = stocks[0].RecordedAt
-					var currentStock int = stocks[0].Amount
+					// Оптимизированный алгоритм для объединения периодов без изменений
+					var periodStart time.Time = prices[0].RecordedAt
+					var currentPrice int = prices[0].FinalPrice
+					var currentOrigPrice int = prices[0].Price
 
-					for i := 1; i < len(stocks); i++ {
-						// Если остаток изменился или это последняя запись
-						if stocks[i].Amount != currentStock || i == len(stocks)-1 {
-							// Если остаток изменился, добавляем запись о периоде
-
-							// Если это последняя запись и остаток не изменился, обновляем время окончания периода
-							periodEnd := stocks[i-1].RecordedAt
-							if i == len(stocks)-1 && stocks[i].Amount == currentStock {
-								periodEnd = stocks[i].RecordedAt
+					for i := 1; i < len(prices); i++ {
+						// Если цена изменилась или это последняя запись
+						if prices[i].FinalPrice != currentPrice || i == len(prices)-1 {
+							// Если это последняя запись и цена не изменилась, обновляем время окончания периода
+							periodEnd := prices[i-1].RecordedAt
+							if i == len(prices)-1 && prices[i].FinalPrice == currentPrice {
+								periodEnd = prices[i].RecordedAt
 							}
 
-							// Форматируем период
+							// Форматируем период как "01.02.2023 12:34 - 02.02.2023 15:45"
 							periodStr := periodStart.Format("02.01.2006 15:04")
 							if !periodStart.Equal(periodEnd) {
 								periodStr += " - " + periodEnd.Format("02.01.2006 15:04")
 							}
 
-							// Если следующий остаток отличается, вычисляем изменение
-							nextStock := stocks[i].Amount
-							stockChange := nextStock - currentStock
+							// Если следующая цена отличается, вычисляем изменение
+							nextPrice := prices[i].FinalPrice
+							priceChange := nextPrice - currentPrice
 
 							// Расчет процента изменения
 							changePercent := 0.0
-							if currentStock > 0 {
-								changePercent = float64(stockChange) / float64(currentStock) * 100
-							} else if currentStock == 0 && nextStock > 0 {
-								changePercent = 100.0
+							if currentPrice > 0 {
+								changePercent = float64(priceChange) / float64(currentPrice) * 100
+							}
+
+							// Расчет скидки маркетплейса
+							marketplaceDiscount := 0.0
+							if currentOrigPrice > 0 {
+								marketplaceDiscount = float64(currentPrice) / float64(currentOrigPrice) * 100
 							}
 
 							// Формируем строку для отчета
@@ -281,43 +214,186 @@ func addDynamicChangesSheet(
 							if firstEntryForProduct {
 								row[0] = prod.Name
 								row[1] = prod.VendorCode
-								row[2] = wh.Name
 								firstEntryForProduct = false
 							} else {
 								row[0] = ""
 								row[1] = ""
-								row[2] = ""
 							}
 
-							row[3] = periodStr
-							row[4] = currentStock
-							row[5] = nextStock
-							row[6] = stockChange
-							row[7] = changePercent
+							row[2] = periodStr
+							row[3] = currentPrice
+							row[4] = nextPrice
+							row[5] = priceChange
+							row[6] = changePercent
+							row[7] = marketplaceDiscount
 
-							// Добавляем строку только если есть изменение остатка
-							if i < len(stocks) && stockChange != 0 {
+							// Добавляем строку только если есть изменение цены
+							if i < len(prices) && priceChange != 0 {
 								rows = append(rows, row)
-							} else if i == len(stocks)-1 && len(rows) == 0 {
-								// Если это последняя запись и у нас еще нет строк (случай одного остатка на весь период)
+							} else if i == len(prices)-1 && len(rows) == 0 {
+								// Если это последняя запись и у нас еще нет строк (случай одной цены на весь период)
 								rows = append(rows, row)
 							}
 
 							// Обновляем значения для следующего периода
-							periodStart = stocks[i].RecordedAt
-							currentStock = stocks[i].Amount
+							periodStart = prices[i].RecordedAt
+							currentPrice = prices[i].FinalPrice
+							currentOrigPrice = prices[i].Price
 						}
 					}
 
 					if len(rows) > 0 {
 						resultChan <- processResult{rows: rows, productAdded: true}
 					}
-				}(product, warehouse)
+				}(product)
+			}
+
+			// Небольшая пауза между пакетами, чтобы дать БД "отдохнуть"
+			if end < len(products) {
+				time.Sleep(100 * time.Millisecond)
+			}
+		}
+	} else {
+		// Аналогичный подход для отчета по остаткам
+		// Разбиваем продукты и склады на пакеты для снижения нагрузки на БД
+		productBatchSize := 10
+		warehouseBatchSize := 3
+
+		for i := 0; i < len(products); i += productBatchSize {
+			endProduct := i + productBatchSize
+			if endProduct > len(products) {
+				endProduct = len(products)
+			}
+			productBatch := products[i:endProduct]
+
+			for j := 0; j < len(warehouses); j += warehouseBatchSize {
+				endWarehouse := j + warehouseBatchSize
+				if endWarehouse > len(warehouses) {
+					endWarehouse = len(warehouses)
+				}
+				warehouseBatch := warehouses[j:endWarehouse]
+
+				for _, product := range productBatch {
+					for _, warehouse := range warehouseBatch {
+						wg.Add(1)
+						go func(prod models.ProductRecord, wh models.Warehouse) {
+							defer wg.Done()
+
+							// Безопасное получение остатков из БД с повторными попытками
+							result, err := executeDBQuery(func() (interface{}, error) {
+								return db.GetStocksForPeriod(ctx, database, prod.ID, wh.ID, startDate, endDate)
+							})
+
+							if err != nil {
+								log.Printf("Error getting stocks for product %d on warehouse %d after retries: %v", prod.ID, wh.ID, err)
+								return
+							}
+
+							stocks := result.([]models.StockRecord)
+							if len(stocks) < 2 {
+								return // Нужно минимум 2 записи для отслеживания изменений
+							}
+
+							// Проверяем, есть ли существенные изменения
+							firstStock := stocks[0].Amount
+							lastStock := stocks[len(stocks)-1].Amount
+							totalChangePercent := 0.0
+							if firstStock > 0 {
+								totalChangePercent = float64(lastStock-firstStock) / float64(firstStock) * 100
+							} else if firstStock == 0 && lastStock > 0 {
+								totalChangePercent = 100.0
+							}
+
+							// Проверяем, превышает ли изменение пороговое значение
+							if math.Abs(totalChangePercent) < config.MinStockChangePercent {
+								return
+							}
+
+							// Подготовка данных для отчета
+							var rows [][]interface{}
+							firstEntryForProduct := true
+
+							// Оптимизированный алгоритм для объединения периодов без изменений остатков
+							var periodStart time.Time = stocks[0].RecordedAt
+							var currentStock int = stocks[0].Amount
+
+							for i := 1; i < len(stocks); i++ {
+								// Если остаток изменился или это последняя запись
+								if stocks[i].Amount != currentStock || i == len(stocks)-1 {
+									// Если это последняя запись и остаток не изменился, обновляем время окончания периода
+									periodEnd := stocks[i-1].RecordedAt
+									if i == len(stocks)-1 && stocks[i].Amount == currentStock {
+										periodEnd = stocks[i].RecordedAt
+									}
+
+									// Форматируем период
+									periodStr := periodStart.Format("02.01.2006 15:04")
+									if !periodStart.Equal(periodEnd) {
+										periodStr += " - " + periodEnd.Format("02.01.2006 15:04")
+									}
+
+									// Если следующий остаток отличается, вычисляем изменение
+									nextStock := stocks[i].Amount
+									stockChange := nextStock - currentStock
+
+									// Расчет процента изменения
+									changePercent := 0.0
+									if currentStock > 0 {
+										changePercent = float64(stockChange) / float64(currentStock) * 100
+									} else if currentStock == 0 && nextStock > 0 {
+										changePercent = 100.0
+									}
+
+									// Формируем строку для отчета
+									row := make([]interface{}, 8)
+
+									// Если это первая запись для данного товара, добавляем имя и артикул
+									if firstEntryForProduct {
+										row[0] = prod.Name
+										row[1] = prod.VendorCode
+										row[2] = wh.Name
+										firstEntryForProduct = false
+									} else {
+										row[0] = ""
+										row[1] = ""
+										row[2] = ""
+									}
+
+									row[3] = periodStr
+									row[4] = currentStock
+									row[5] = nextStock
+									row[6] = stockChange
+									row[7] = changePercent
+
+									// Добавляем строку только если есть изменение остатка
+									if i < len(stocks) && stockChange != 0 {
+										rows = append(rows, row)
+									} else if i == len(stocks)-1 && len(rows) == 0 {
+										rows = append(rows, row)
+									}
+
+									// Обновляем значения для следующего периода
+									periodStart = stocks[i].RecordedAt
+									currentStock = stocks[i].Amount
+								}
+							}
+
+							if len(rows) > 0 {
+								resultChan <- processResult{rows: rows, productAdded: true}
+							}
+						}(product, warehouse)
+					}
+				}
+
+				// Пауза между пакетами
+				if endWarehouse < len(warehouses) || endProduct < len(products) {
+					time.Sleep(50 * time.Millisecond)
+				}
 			}
 		}
 	}
 
-	// Ожидаем завершения всех горутин и закрываем канал с результатами
+	// Запускаем горутину, которая будет ждать завершения всех рабочих и закрывать канал результатов
 	go func() {
 		wg.Wait()
 		close(resultChan)
