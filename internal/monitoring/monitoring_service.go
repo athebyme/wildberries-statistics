@@ -48,7 +48,7 @@ func NewMonitoringService(cfg config.Config) (*Service, error) {
 	log.Printf("allowed users %v", cfg.AllowedUserIDs)
 
 	// Создаем конфигурацию для отчетов
-	reportConfig := report.Config{
+	reportConfig := report.ReportConfig{
 		MinPriceChangePercent: cfg.PriceThreshold,
 		MinStockChangePercent: cfg.StockThreshold,
 	}

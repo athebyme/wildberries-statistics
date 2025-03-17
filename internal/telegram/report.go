@@ -30,7 +30,7 @@ func addDynamicChangesSheet(
 	database *sqlx.DB,
 	startDate, endDate time.Time,
 	isPriceReport bool,
-	config report.Config,
+	config report.ReportConfig,
 	warehouses []models.Warehouse,
 ) error {
 	// Название листа в зависимости от типа отчета
@@ -746,7 +746,7 @@ func (b *Bot) generatePriceReport(chatID int64, startDate, endDate time.Time) {
 }
 
 // generatePriceReportExcel генерирует отчет по ценам в формате Excel
-func (b *Bot) generatePriceReportExcel(chatID int64, startDate, endDate time.Time, config report.Config) {
+func (b *Bot) generatePriceReportExcel(chatID int64, startDate, endDate time.Time, config report.ReportConfig) {
 	ctx := context.Background()
 
 	// Получаем товары параллельно с другими операциями
@@ -1103,7 +1103,7 @@ func (b *Bot) generateStockReport(chatID int64, startDate, endDate time.Time) {
 }
 
 // generateStockReportExcel генерирует отчет по остаткам в формате Excel
-func (b *Bot) generateStockReportExcel(chatID int64, startDate, endDate time.Time, config report.Config) {
+func (b *Bot) generateStockReportExcel(chatID int64, startDate, endDate time.Time, config report.ReportConfig) {
 	ctx := context.Background()
 
 	// Код остается тот же, как был раньше, до создания Excel файла
@@ -1369,7 +1369,7 @@ func (b *Bot) generateStockReportExcel(chatID int64, startDate, endDate time.Tim
 }
 
 // generateStockReportPDFToFile генерирует отчет по остаткам в PDF и сохраняет его в файл
-func (b *Bot) generateStockReportPDFToFile(startDate, endDate time.Time, config report.Config) (string, string, error) {
+func (b *Bot) generateStockReportPDFToFile(startDate, endDate time.Time, config report.ReportConfig) (string, string, error) {
 	ctx := context.Background()
 
 	// Получаем товары и склады
@@ -1487,7 +1487,7 @@ func (b *Bot) generateStockReportPDFToFile(startDate, endDate time.Time, config 
 			continue
 		}
 
-		// Опциональная фильтрация по MinStockChangePercent из report.Config
+		// Опциональная фильтрация по MinStockChangePercent из report.ReportConfig
 		if config.MinStockChangePercent > 0 && totalInitialStock > 0 {
 			stockChangePercent := (float64(totalChange) / float64(totalInitialStock)) * 100
 			if stockChangePercent < config.MinStockChangePercent && stockChangePercent > -config.MinStockChangePercent {
@@ -1876,7 +1876,7 @@ func (b *Bot) generateDailyStockReport(ctx context.Context, startDate, endDate t
 
 // generatePriceReportExcelToFile генерирует отчет по ценам в формате Excel и сохраняет его во временный файл.
 // Возвращает путь к файлу, имя отчета и ошибку (если возникнет).
-func (b *Bot) generatePriceReportExcelToFile(startDate, endDate time.Time, config report.Config) (string, string, error) {
+func (b *Bot) generatePriceReportExcelToFile(startDate, endDate time.Time, config report.ReportConfig) (string, string, error) {
 	ctx := context.Background()
 
 	products, err := db.GetAllProducts(ctx, b.db)
@@ -1995,7 +1995,7 @@ func (b *Bot) generatePriceReportExcelToFile(startDate, endDate time.Time, confi
 	return filePath, filename, nil
 }
 
-func (b *Bot) generateStockReportExcelToFile(startDate, endDate time.Time, config report.Config) (string, string, error) {
+func (b *Bot) generateStockReportExcelToFile(startDate, endDate time.Time, config report.ReportConfig) (string, string, error) {
 	ctx := context.Background()
 
 	// Получаем все товары из базы данных
@@ -2191,7 +2191,7 @@ func (b *Bot) generateStockReportExcelToFile(startDate, endDate time.Time, confi
 	return filePath, filename, nil
 }
 
-func (b *Bot) generatePriceReportPDFToFile(startDate, endDate time.Time, config report.Config) (string, string, error) {
+func (b *Bot) generatePriceReportPDFToFile(startDate, endDate time.Time, config report.ReportConfig) (string, string, error) {
 	ctx := context.Background()
 
 	// Получаем список всех товаров из базы данных
@@ -2387,7 +2387,7 @@ func (b *Bot) generatePriceReportPDFToFile(startDate, endDate time.Time, config 
 }
 
 // generatePriceReportPDF генерирует отчет по ценам в формате PDF
-func (b *Bot) generatePriceReportPDF(chatID int64, startDate, endDate time.Time, config report.Config) {
+func (b *Bot) generatePriceReportPDF(chatID int64, startDate, endDate time.Time, config report.ReportConfig) {
 	ctx := context.Background()
 
 	// Получаем данные товаров из БД
@@ -2705,7 +2705,7 @@ func (b *Bot) generatePriceReportPDF(chatID int64, startDate, endDate time.Time,
 }
 
 // generateStockReportPDF генерирует отчет по складским запасам в формате PDF
-func (b *Bot) generateStockReportPDF(chatID int64, startDate, endDate time.Time, config report.Config) {
+func (b *Bot) generateStockReportPDF(chatID int64, startDate, endDate time.Time, config report.ReportConfig) {
 	ctx := context.Background()
 
 	// Получаем данные о товарах и складах

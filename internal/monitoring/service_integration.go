@@ -54,7 +54,7 @@ func InitializeImprovedServices(
 	// Initialize ExcelGenerator
 	excelGenerator := report.NewExcelGenerator(
 		db,
-		report.Config{
+		report.ReportConfig{
 			MinPriceChangePercent: cfg.PriceThreshold,
 			MinStockChangePercent: cfg.StockThreshold,
 		},

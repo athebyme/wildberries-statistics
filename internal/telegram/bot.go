@@ -20,7 +20,7 @@ type Bot struct {
 	chatID       int64
 	db           *sqlx.DB
 	allowedUsers map[int64]bool
-	config       report.Config
+	config       report.ReportConfig
 	userStates   map[int64]string
 
 	emailService   *EmailService
@@ -28,7 +28,7 @@ type Bot struct {
 	excelGenerator *report.ExcelGenerator
 }
 
-func NewBot(token string, chatID int64, db *sqlx.DB, allowedUserIDs []int64, config report.Config) (*Bot, error) {
+func NewBot(token string, chatID int64, db *sqlx.DB, allowedUserIDs []int64, config report.ReportConfig) (*Bot, error) {
 	api, err := tgbotapi.NewBotAPI(token)
 	if err != nil {
 		return nil, fmt.Errorf("initializing telegram bot: %w", err)

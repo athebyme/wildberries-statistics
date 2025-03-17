@@ -21,11 +21,11 @@ import (
 type ExcelGenerator struct {
 	db             *sqlx.DB
 	workerPoolSize int
-	reportConfig   Config
+	reportConfig   ReportConfig
 }
 
 // NewExcelGenerator creates a new Excel report generator
-func NewExcelGenerator(db *sqlx.DB, reportConfig Config, workerPoolSize int) *ExcelGenerator {
+func NewExcelGenerator(db *sqlx.DB, reportConfig ReportConfig, workerPoolSize int) *ExcelGenerator {
 	if workerPoolSize <= 0 {
 		workerPoolSize = 5 // Default worker pool size
 	}
