@@ -1706,7 +1706,7 @@ func (b *Bot) generateDailyPriceReport(ctx context.Context, startDate, endDate t
 	// Используем новый ExcelGenerator, если он доступен
 	if b.excelGenerator != nil {
 		log.Println("Используем улучшенный ExcelGenerator")
-		filePath, fileName, err := b.excelGenerator.GeneratePriceReportExcel(ctx, startDate, endDate)
+		filePath, _, err := b.excelGenerator.GeneratePriceReportExcel(ctx, startDate, endDate)
 		if err != nil {
 			return fmt.Errorf("ошибка при генерации отчета по ценам: %w", err)
 		}
@@ -1720,14 +1720,12 @@ func (b *Bot) generateDailyPriceReport(ctx context.Context, startDate, endDate t
 			return fmt.Errorf("ошибка при отправке отчета: %w", err)
 		}
 
-		// Удаляем временный файл
-		// os.Remove(filePath)
-
 		return nil
 	}
 
 	// Используем старый метод, если новый генератор недоступен
-	return b.generateDailyPriceReportLegacy(ctx, startDate, endDate)
+	return fmt.Errorf("error")
+	//return b.generateDailyPriceReportLegacy(ctx, startDate, endDate)
 }
 
 // generateDailyStockReport генерирует и отправляет ежедневный отчет по остаткам
