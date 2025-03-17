@@ -26,10 +26,10 @@ services:
       db-first:
         condition: service_healthy
     environment:
-      - WB_API_KEY=eyJhbGciOiJFUzI1NiIsImtpZCI6IjIwMjUwMjE3djEiLCJ0eXAiOiJKV1QifQ.eyJlbnQiOjEsImV4cCI6MTc1NjQ2MDEyMSwiaWQiOiIwMTk1NDk1NS1lNjZhLTdhNWYtYThiZS0xYzVlMWEwZjYxZWEiLCJpaWQiOjUzNjU3NjI4LCJvaWQiOjEwODA1MTYsInMiOjEwNzM3NDE5NTAsInNpZCI6IjdhZDQzMTNjLTMzMjItNDkyNi05YTE2LTUxMTc5MmE0MjE1ZSIsInQiOmZhbHNlLCJ1aWQiOjUzNjU3NjI4fQ.-f0OoZ9XYzzaKZsxzSp0X0tyBDLYya8Wpv_tm4y1-gwanfjkTivRKgNsWF_ghLZIwGA_pzJj1V7yRKrE0sP2KA
-      - TELEGRAM_TOKEN=7536169840:AAH_DD6rmuoe3nN3s5t5islOi6tOvjJRZ78
-      - TELEGRAM_CHAT_ID=447590340
-      - PG_CONN_STRING=postgres://bananzza:bananzza_monitor@db-first:5432/db_first?sslmode=disable
+      - WB_API_KEY=
+      - TELEGRAM_TOKEN=
+      - TELEGRAM_CHAT_ID=
+      - PG_CONN_STRING=
       - MONITORING_INTERVAL_MIN=10
       - PRODUCT_UPDATE_INTERVAL_HOUR=12
       - PRICE_THRESHOLD=10
@@ -38,7 +38,7 @@ services:
       - MAX_RETRIES=3
       - RETRY_INTERVAL_SEC=5
       - REQUEST_TIMEOUT_SEC=100
-      - TELEGRAM_ALLOWED_USER_IDS="447590340"
+      - TELEGRAM_ALLOWED_USER_IDS=
       - SMTP_HOST=mailhog  # Имя сервиса MailHog в Docker Compose сети
       - SMTP_PORT=1025     # Стандартный SMTP порт MailHog
       - SMTP_USER=""       # MailHog не требует авторизации
@@ -71,10 +71,10 @@ services:
       db-second:
         condition: service_healthy
     environment:
-      - WB_API_KEY=eyJhbGciOiJFUzI1NiIsImtpZCI6IjIwMjUwMjE3djEiLCJ0eXAiOiJKV1QifQ.eyJlbnQiOjEsImV4cCI6MTc1NjQ2MDA3OCwiaWQiOiIwMTk1NDk1NS0zZGM4LTdlMjUtYTY2Zi04YjIzOGRhMWUxYzUiLCJpaWQiOjYzNjcwMTI1LCJvaWQiOjQ0NTI5NCwicyI6MTA3Mzc0MTk1MCwic2lkIjoiNTJkZWRlZDUtYmU0OC00MjBiLTlmODYtZjFmZjcwMmZkZjY1IiwidCI6ZmFsc2UsInVpZCI6NjM2NzAxMjV9.WQjgR7lNOomxSbrSsUwBi0HN6jABVZwtwmdE2gMZYMe98E1JM29sCQQj2RM2a7PobnNbiKSG7c6gWrjZ8ceyDg
-      - TELEGRAM_TOKEN=7275211129:AAEn_1RnzqyFQxLD2HFJBWjTY2jVv4kqUUk
-      - TELEGRAM_CHAT_ID=5164000485
-      - PG_CONN_STRING=postgres://lasciva:lasciva@db-second:5432/db_second?sslmode=disable
+      - WB_API_KEY=
+      - TELEGRAM_TOKEN=
+      - TELEGRAM_CHAT_ID=
+      - PG_CONN_STRING=
       - MONITORING_INTERVAL_MIN=10
       - PRODUCT_UPDATE_INTERVAL_HOUR=5
       - PRICE_THRESHOLD=10
@@ -83,7 +83,7 @@ services:
       - MAX_RETRIES=3
       - RETRY_INTERVAL_SEC=5
       - REQUEST_TIMEOUT_SEC=100
-      - TELEGRAM_ALLOWED_USER_IDS="5164000485"
+      - TELEGRAM_ALLOWED_USER_IDS=
       - SMTP_HOST=mailhog  # Имя сервиса MailHog в Docker Compose сети
       - SMTP_PORT=1025     # Стандартный SMTP порт MailHog
       - SMTP_USER=""       # MailHog не требует авторизации
