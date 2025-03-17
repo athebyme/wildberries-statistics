@@ -5,6 +5,9 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"github.com/jmoiron/sqlx"
+	_ "github.com/lib/pq"
+	"golang.org/x/time/rate"
 	"log"
 	"math"
 	"net/http"
@@ -16,14 +19,11 @@ import (
 	"wbmonitoring/monitoring/internal/models"
 	"wbmonitoring/monitoring/internal/search"
 	"wbmonitoring/monitoring/internal/telegram"
-
-	"github.com/jmoiron/sqlx"
-	_ "github.com/lib/pq"
-	"golang.org/x/time/rate"
+	"wbmonitoring/monitoring/internal/telegram/report"
 )
 
 // MonitoringService struct
-type MonitoringService struct {
+type Service struct {
 	db               *sqlx.DB
 	config           config.Config
 	pricesLimiter    *rate.Limiter
@@ -33,59 +33,97 @@ type MonitoringService struct {
 	httpClient       *http.Client
 	telegramBot      *telegram.Bot
 	recordCleanupSvc *RecordCleanupService
+
+	ctx context.Context
 }
 
 // NewMonitoringService creates a new MonitoringService.
-func NewMonitoringService(cfg config.Config) (*MonitoringService, error) {
+func NewMonitoringService(cfg config.Config) (*Service, error) {
+	// Подключаемся к базе данных
 	database, err := sqlx.Connect("postgres", cfg.PGConnString)
 	if err != nil {
 		return nil, fmt.Errorf("connecting to database: %w", err)
 	}
+
 	log.Printf("allowed users %v", cfg.AllowedUserIDs)
+
+	// Создаем конфигурацию для отчетов
+	reportConfig := report.Config{
+		MinPriceChangePercent: cfg.PriceThreshold,
+		MinStockChangePercent: cfg.StockThreshold,
+	}
+
+	// Инициализируем Telegram бота
 	telegramBot, err := telegram.NewBot(
 		cfg.TelegramToken,
 		cfg.TelegramChatID,
 		database,
 		cfg.AllowedUserIDs,
-		telegram.ReportConfig{
-			MinPriceChangePercent: config.PriceChangeThreshold,
-			MinStockChangePercent: config.StockChangeThreshold,
-		})
+		reportConfig)
 	if err != nil {
 		return nil, fmt.Errorf("initializing telegram bot: %w", err)
 	}
 
-	searchConfig := search.SearchEngineConfig{ // Используем отдельную конфиг для SearchEngine
+	// Инициализируем улучшенные сервисы для бота
+	// (можно вынести в отдельную функцию или сделать опциональным)
+	if cfg.UseImprovedServices {
+		// Создаем EmailService
+		emailService, err := telegram.NewEmailService(database)
+		if err != nil {
+			log.Printf("Warning: Failed to initialize EmailService: %v", err)
+		}
+
+		// Создаем PDFGenerator
+		pdfGenerator := report.NewPDFGenerator(database)
+
+		// Создаем ExcelGenerator
+		excelGenerator := report.NewExcelGenerator(
+			database,
+			reportConfig,
+			cfg.WorkerCount, // Используем настройку воркеров из конфига
+		)
+
+		// Обновляем бота с новыми сервисами
+		if emailService != nil && pdfGenerator != nil && excelGenerator != nil {
+			if err := telegramBot.UpdateReportServices(emailService, pdfGenerator, excelGenerator); err != nil {
+				log.Printf("Warning: Failed to update bot with improved services: %v", err)
+			} else {
+				log.Println("Successfully initialized improved reporting services")
+			}
+		}
+	}
+
+	// Конфигурация для поискового движка
+	searchConfig := search.SearchEngineConfig{
 		WorkerCount:    cfg.WorkerCount,
 		MaxRetries:     cfg.MaxRetries,
 		RetryInterval:  cfg.RetryInterval,
 		RequestTimeout: cfg.RequestTimeout,
-		ApiKey:         cfg.ApiKey, // Передаем API ключ
+		ApiKey:         cfg.ApiKey,
 	}
 
-	//cleanupSvc := NewRecordCleanupService(
-	//	database,
-	//	24*time.Hour,    // Запускаем очистку раз в сутки
-	//	30*24*time.Hour, // Храним данные за 30 дней
-	//)
+	// Инициализируем поисковый движок
+	searchEngine := search.NewSearchEngine(database.DB, os.Stdout, searchConfig)
 
-	searchEngine := search.NewSearchEngine(database.DB, os.Stdout, searchConfig) // Используем db.DB, так как SearchEngine ожидает *sql.DB
+	// Инициализируем HTTP клиент
 	client := http.Client{Timeout: cfg.RequestTimeout}
-	return &MonitoringService{
+
+	// Создаем и возвращаем сервис мониторинга
+	return &Service{
 		db:               database,
 		config:           cfg,
 		pricesLimiter:    rate.NewLimiter(rate.Every(time.Second*6/10), 1), // 10 запросов за 6 секунд
 		stocksLimiter:    rate.NewLimiter(rate.Every(time.Minute/300), 10), // 300 запросов в минуту
 		warehouseLimiter: rate.NewLimiter(rate.Every(time.Minute/300), 10), // 300 запросов в минуту
 		telegramBot:      telegramBot,
-		//recordCleanupSvc: cleanupSvc,
-		searchEngine: searchEngine, // Инициализируем SearchEngine
-		httpClient:   &client,
+		searchEngine:     searchEngine,
+		httpClient:       &client,
+		ctx:              context.Background(), // Инициализируем контекст по умолчанию
 	}, nil
 }
 
 // RunProductUpdater запускает обновление продуктов по расписанию.
-func (m *MonitoringService) RunProductUpdater(ctx context.Context) error {
+func (m *Service) RunProductUpdater(ctx context.Context) error {
 	ticker := time.NewTicker(m.config.ProductUpdateInterval)
 	defer ticker.Stop()
 
@@ -105,7 +143,7 @@ func (m *MonitoringService) RunProductUpdater(ctx context.Context) error {
 }
 
 // UpdateProducts обновляет список продуктов в базе данных, используя SearchEngine.
-func (m *MonitoringService) UpdateProducts(ctx context.Context) error {
+func (m *Service) UpdateProducts(ctx context.Context) error {
 	nomenclatureChan := make(chan models.Nomenclature) // Канал для приема номенклатур
 	settings := models.Settings{
 		Sort:   models.Sort{Ascending: false},
@@ -132,7 +170,7 @@ func (m *MonitoringService) UpdateProducts(ctx context.Context) error {
 }
 
 // ProcessNomenclature обрабатывает одну номенклатуру, сохраняя или обновляя данные в базе.
-func (m *MonitoringService) ProcessNomenclature(ctx context.Context, nomenclature models.Nomenclature) error {
+func (m *Service) ProcessNomenclature(ctx context.Context, nomenclature models.Nomenclature) error {
 	barcode := ""
 	if len(nomenclature.Sizes) > 0 && len(nomenclature.Sizes[0].Skus) > 0 {
 		barcode = nomenclature.Sizes[0].Skus[0] // Берем первый баркод из первого размера. Уточнить логику, если нужно иначе.
@@ -168,7 +206,10 @@ func (m *MonitoringService) ProcessNomenclature(ctx context.Context, nomenclatur
 }
 
 // RunMonitoring запускает основной цикл мониторинга.
-func (m *MonitoringService) RunMonitoring(ctx context.Context) error {
+func (m *Service) RunMonitoring(ctx context.Context) error {
+
+	m.ctx = ctx
+
 	// Отправляем приветственное сообщение
 	//if err := m.telegramBot.SendTelegramAlert("🔄 Сервис мониторинга запущен"); err != nil {
 	//	log.Printf("Failed to send welcome message: %v", err)
@@ -214,7 +255,7 @@ func (m *MonitoringService) RunMonitoring(ctx context.Context) error {
 }
 
 // UpdateWarehouses updates the list of warehouses in the database by fetching from the API.
-func (m *MonitoringService) UpdateWarehouses(ctx context.Context) error {
+func (m *Service) UpdateWarehouses(ctx context.Context) error {
 	apiKey := m.config.ApiKey // Assuming API key is in config
 	if apiKey == "" {
 		return fmt.Errorf("API key for Wildberries is not configured")
@@ -230,7 +271,7 @@ func (m *MonitoringService) UpdateWarehouses(ctx context.Context) error {
 }
 
 // runDailyReporting запускает процесс отправки ежедневных отчетов
-func (m *MonitoringService) runDailyReporting(ctx context.Context) {
+func (m *Service) runDailyReporting(ctx context.Context) {
 	// Вычисляем время до следующего запуска (10:00 утра)
 	now := time.Now()
 	nextRun := time.Date(now.Year(), now.Month(), now.Day(), 10, 0, 0, 0, now.Location())
@@ -261,7 +302,7 @@ func (m *MonitoringService) runDailyReporting(ctx context.Context) {
 	}
 }
 
-func (m *MonitoringService) SendGreetings(ctx context.Context) error {
+func (m *Service) SendGreetings(ctx context.Context) error {
 	log.Println("Sending greetings")
 	seller, err := api.GetSellerInfo(ctx, *m.httpClient, m.config.ApiKey, rate.NewLimiter(rate.Every(1*time.Minute), 1))
 	if err != nil {
@@ -279,7 +320,7 @@ func (m *MonitoringService) SendGreetings(ctx context.Context) error {
 }
 
 // ProcessMonitoring обрабатывает данные мониторинга.
-func (m *MonitoringService) ProcessMonitoring(ctx context.Context) error {
+func (m *Service) ProcessMonitoring(ctx context.Context) error {
 	log.Println("Starting monitoring cycle")
 
 	// Получаем список всех продуктов (без использования last_checked)
@@ -304,7 +345,7 @@ func (m *MonitoringService) ProcessMonitoring(ctx context.Context) error {
 }
 
 // GetAllProducts retrieves all products from the database.
-func (m *MonitoringService) GetAllProducts(ctx context.Context) ([]models.ProductRecord, error) {
+func (m *Service) GetAllProducts(ctx context.Context) ([]models.ProductRecord, error) {
 	var products []models.ProductRecord
 	query := `SELECT id, nm_id, vendor_code, barcode, name, created_at FROM products`
 
@@ -316,7 +357,7 @@ func (m *MonitoringService) GetAllProducts(ctx context.Context) ([]models.Produc
 }
 
 // processStocks обрабатывает складские остатки для всех товаров.
-func (m *MonitoringService) processStocks(ctx context.Context, products []models.ProductRecord) error {
+func (m *Service) processStocks(ctx context.Context, products []models.ProductRecord) error {
 	// Получаем список складов
 	warehouses, err := m.GetWarehouses(ctx)
 	if err != nil {
@@ -334,7 +375,7 @@ func (m *MonitoringService) processStocks(ctx context.Context, products []models
 }
 
 // processWarehouseStocks обрабатывает остатки для конкретного склада.
-func (m *MonitoringService) processWarehouseStocks(ctx context.Context, warehouse models.Warehouse, products []models.ProductRecord) error {
+func (m *Service) processWarehouseStocks(ctx context.Context, warehouse models.Warehouse, products []models.ProductRecord) error {
 	// Разбиваем продукты на партии по 1000 товаров (ограничение API)
 	batchSize := 1000
 
@@ -392,7 +433,7 @@ func (m *MonitoringService) processWarehouseStocks(ctx context.Context, warehous
 }
 
 // processPrices обрабатывает цены товаров.
-func (m *MonitoringService) processPrices(ctx context.Context, products []models.ProductRecord) error {
+func (m *Service) processPrices(ctx context.Context, products []models.ProductRecord) error {
 	// Разбиваем продукты на группы для запросов с лимитом
 	// API позволяет максимум 1000 товаров на страницу
 	limit := 1000
@@ -456,7 +497,7 @@ func (m *MonitoringService) processPrices(ctx context.Context, products []models
 }
 
 // processPriceRecord обрабатывает запись о цене размера товара.
-func (m *MonitoringService) processPriceRecord(ctx context.Context, product *models.ProductRecord, size models.GoodSize) error {
+func (m *Service) processPriceRecord(ctx context.Context, product *models.ProductRecord, size models.GoodSize) error {
 	// Вычисляем итоговую цену с учетом скидок
 	finalPrice := size.DiscountedPrice
 	clubPrice := size.ClubDiscountedPrice
@@ -484,7 +525,7 @@ func (m *MonitoringService) processPriceRecord(ctx context.Context, product *mod
 }
 
 // CheckPriceChanges проверяет изменения цен и отправляет уведомления.
-func (m *MonitoringService) CheckPriceChanges(ctx context.Context, product *models.ProductRecord, newPrice *models.PriceRecord) error {
+func (m *Service) CheckPriceChanges(ctx context.Context, product *models.ProductRecord, newPrice *models.PriceRecord) error {
 	lastPrice, err := m.GetLastPrice(ctx, product.ID)
 	if err != nil {
 		return fmt.Errorf("getting last price: %w", err)
@@ -534,7 +575,7 @@ func (m *MonitoringService) CheckPriceChanges(ctx context.Context, product *mode
 }
 
 // CheckStockChanges проверяет изменения остатков и отправляет уведомления.
-func (m *MonitoringService) CheckStockChanges(ctx context.Context, product *models.ProductRecord, newStock *models.StockRecord) error {
+func (m *Service) CheckStockChanges(ctx context.Context, product *models.ProductRecord, newStock *models.StockRecord) error {
 	lastStock, err := db.GetLastStock(ctx, m.db, product.ID, newStock.WarehouseID)
 	if err != nil {
 		return fmt.Errorf("getting last stock: %w", err)
@@ -586,61 +627,61 @@ func (m *MonitoringService) CheckStockChanges(ctx context.Context, product *mode
 }
 
 // GetWarehouses retrieves warehouses from the API.
-func (m *MonitoringService) GetWarehouses(ctx context.Context) ([]models.Warehouse, error) {
+func (m *Service) GetWarehouses(ctx context.Context) ([]models.Warehouse, error) {
 	return api.GetWarehouses(ctx, m.httpClient, m.config.ApiKey, m.warehouseLimiter)
 }
 
 // GetStocks retrieves stock information from the API.
-func (m *MonitoringService) GetStocks(ctx context.Context, warehouseID int64, skus []string) (*models.StockResponse, error) {
+func (m *Service) GetStocks(ctx context.Context, warehouseID int64, skus []string) (*models.StockResponse, error) {
 	return api.GetStocks(ctx, m.httpClient, m.config.ApiKey, m.stocksLimiter, warehouseID, skus)
 }
 
 // GetPriceHistory retrieves price history from the API.
-func (m *MonitoringService) GetPriceHistory(ctx context.Context, uploadID int, limit, offset int) (*models.PriceHistoryResponse, error) {
+func (m *Service) GetPriceHistory(ctx context.Context, uploadID int, limit, offset int) (*models.PriceHistoryResponse, error) {
 	return api.GetPriceHistory(ctx, m.httpClient, m.config.ApiKey, m.pricesLimiter, uploadID, limit, offset)
 }
 
 // GetGoodsPrices retrieves goods prices from the API.
-func (m *MonitoringService) GetGoodsPrices(ctx context.Context, limit int, offset int, filterNmID int) (*models.GoodsPricesResponse, error) {
+func (m *Service) GetGoodsPrices(ctx context.Context, limit int, offset int, filterNmID int) (*models.GoodsPricesResponse, error) {
 	return api.GetGoodsPrices(ctx, m.httpClient, m.config.ApiKey, m.pricesLimiter, limit, offset, filterNmID)
 }
 
 // GetLastPrice retrieves the last price record from the database.
-func (m *MonitoringService) GetLastPrice(ctx context.Context, productID int) (*models.PriceRecord, error) {
+func (m *Service) GetLastPrice(ctx context.Context, productID int) (*models.PriceRecord, error) {
 	return db.GetLastPrice(ctx, m.db, productID)
 }
 
 // GetLastStock retrieves the last stock record from the database.
-func (m *MonitoringService) GetLastStock(ctx context.Context, productID int, warehouseID int64) (*models.StockRecord, error) {
+func (m *Service) GetLastStock(ctx context.Context, productID int, warehouseID int64) (*models.StockRecord, error) {
 	return db.GetLastStock(ctx, m.db, productID, warehouseID)
 }
 
 // SavePrice saves a price record to the database.
-func (m *MonitoringService) SavePrice(ctx context.Context, price *models.PriceRecord) error {
+func (m *Service) SavePrice(ctx context.Context, price *models.PriceRecord) error {
 	return db.SavePrice(ctx, m.db, price)
 }
 
 // SaveStock saves a stock record to the database.
-func (m *MonitoringService) SaveStock(ctx context.Context, stock *models.StockRecord) error {
+func (m *Service) SaveStock(ctx context.Context, stock *models.StockRecord) error {
 	return db.SaveStock(ctx, m.db, stock)
 }
 
 // InitDB initializes the database schema.
-func (m *MonitoringService) InitDB() error {
+func (m *Service) InitDB() error {
 	return db.InitDB(m.db)
 }
 
 // GetProductCount retrieves the count of products in the database.
-func (m *MonitoringService) GetProductCount(ctx context.Context) (int, error) {
+func (m *Service) GetProductCount(ctx context.Context) (int, error) {
 	return db.GetProductCount(ctx, m.db)
 }
 
 // UpdatePriceCheckStatus updates the last price check status in the database.
-func (m *MonitoringService) UpdatePriceCheckStatus(ctx context.Context, productID int) error {
+func (m *Service) UpdatePriceCheckStatus(ctx context.Context, productID int) error {
 	return db.UpdatePriceCheckStatus(ctx, m.db, productID)
 }
 
 // UpdateStockCheckStatus updates the last stock check status in the database.
-func (m *MonitoringService) UpdateStockCheckStatus(ctx context.Context, productID int) error {
+func (m *Service) UpdateStockCheckStatus(ctx context.Context, productID int) error {
 	return db.UpdateStockCheckStatus(ctx, m.db, productID)
 }

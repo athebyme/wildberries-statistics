@@ -18,6 +18,7 @@ import (
 	"time"
 	"wbmonitoring/monitoring/internal/db"
 	"wbmonitoring/monitoring/internal/models"
+	"wbmonitoring/monitoring/internal/telegram/report"
 )
 
 // addDynamicChangesSheet добавляет лист с динамикой изменений во времени для товаров
@@ -29,7 +30,7 @@ func addDynamicChangesSheet(
 	database *sqlx.DB,
 	startDate, endDate time.Time,
 	isPriceReport bool,
-	config ReportConfig,
+	config report.Config,
 	warehouses []models.Warehouse,
 ) error {
 	// Название листа в зависимости от типа отчета
@@ -510,7 +511,7 @@ func addDynamicChangesSheet(
 	return nil
 }
 
-// generateReport генерирует и отправляет отчет за выбранный период
+// Обновляем метод генерации и отправки отчетов с использованием новых сервисов
 func (b *Bot) generateReport(chatID int64, reportType, period, format string) {
 	// Отправляем сообщение о начале генерации отчета
 	statusMsg, _ := b.api.Send(tgbotapi.NewMessage(chatID, "Генерация отчета... Пожалуйста, подождите."))
@@ -549,7 +550,7 @@ func (b *Bot) generateReport(chatID int64, reportType, period, format string) {
 			startDateStr := parts[1]
 			endDateStr := parts[2]
 
-			// Используем тот же формат, что и в parseCustomPeriod - "02.01.2006"
+			// Используем формат "02.01.2006"
 			layout := "02.01.2006"
 			var err error
 
@@ -578,20 +579,53 @@ func (b *Bot) generateReport(chatID int64, reportType, period, format string) {
 	}
 
 	// Генерируем отчет в зависимости от типа и формата
+	var filePath, _ string
+	var err error
+
+	ctx := context.Background()
+
 	if reportType == "prices" {
 		if format == "pdf" {
-			b.generatePriceReportPDF(chatID, startDate, endDate, b.config)
+			// Используем новый PDF генератор
+			if b.pdfGenerator != nil {
+				filePath, _, err = b.pdfGenerator.GeneratePriceReportPDF(ctx, startDate, endDate, b.config.MinPriceChangePercent)
+			} else {
+				// Используем старый метод, если новый генератор недоступен
+				b.generatePriceReportPDF(chatID, startDate, endDate, b.config)
+				return
+			}
 		} else if format == "excel" {
-			b.generatePriceReportExcel(chatID, startDate, endDate, b.config)
+			// Используем новый Excel генератор
+			if b.excelGenerator != nil {
+				filePath, _, err = b.excelGenerator.GeneratePriceReportExcel(ctx, startDate, endDate)
+			} else {
+				// Используем старый метод, если новый генератор недоступен
+				b.generatePriceReportExcel(chatID, startDate, endDate, b.config)
+				return
+			}
 		} else {
 			b.api.Send(tgbotapi.NewMessage(chatID, "Неизвестный формат отчета. Пожалуйста, выберите корректный формат."))
 			return
 		}
 	} else if reportType == "stocks" {
 		if format == "pdf" {
-			b.generateStockReportPDF(chatID, startDate, endDate, b.config)
+			// Используем новый PDF генератор
+			if b.pdfGenerator != nil {
+				filePath, _, err = b.pdfGenerator.GenerateStockReportPDF(ctx, startDate, endDate, b.config.MinStockChangePercent)
+			} else {
+				// Используем старый метод, если новый генератор недоступен
+				b.generateStockReportPDF(chatID, startDate, endDate, b.config)
+				return
+			}
 		} else if format == "excel" {
-			b.generateStockReportExcel(chatID, startDate, endDate, b.config)
+			// Используем новый Excel генератор
+			if b.excelGenerator != nil {
+				filePath, _, err = b.excelGenerator.GenerateStockReportExcel(ctx, startDate, endDate)
+			} else {
+				// Используем старый метод, если новый генератор недоступен
+				b.generateStockReportExcel(chatID, startDate, endDate, b.config)
+				return
+			}
 		} else {
 			b.api.Send(tgbotapi.NewMessage(chatID, "Неизвестный формат отчета. Пожалуйста, выберите корректный формат."))
 			return
@@ -600,6 +634,34 @@ func (b *Bot) generateReport(chatID int64, reportType, period, format string) {
 		b.api.Send(tgbotapi.NewMessage(chatID, "Неизвестный тип отчета. Пожалуйста, выберите корректный тип."))
 		return
 	}
+
+	if err != nil {
+		log.Printf("Ошибка генерации отчета: %v", err)
+		b.api.Send(tgbotapi.NewMessage(chatID, fmt.Sprintf("Ошибка при создании отчета: %v", err)))
+		return
+	}
+
+	// Отправляем файл в Telegram
+	doc := tgbotapi.NewDocument(chatID, tgbotapi.FilePath(filePath))
+
+	if reportType == "prices" {
+		doc.Caption = fmt.Sprintf("📈 Отчет по ценам за период %s - %s",
+			startDate.Format("02.01.2006"),
+			endDate.Format("02.01.2006"))
+	} else {
+		doc.Caption = fmt.Sprintf("📦 Отчет по остаткам за период %s - %s",
+			startDate.Format("02.01.2006"),
+			endDate.Format("02.01.2006"))
+	}
+
+	_, err = b.api.Send(doc)
+	if err != nil {
+		log.Printf("Ошибка отправки файла: %v", err)
+		b.api.Send(tgbotapi.NewMessage(chatID, fmt.Sprintf("Ошибка при отправке файла: %v", err)))
+	}
+
+	// Удаляем временный файл
+	os.Remove(filePath)
 }
 
 // generatePriceReport генерирует отчет по ценам в текстовом формате
@@ -684,7 +746,7 @@ func (b *Bot) generatePriceReport(chatID int64, startDate, endDate time.Time) {
 }
 
 // generatePriceReportExcel генерирует отчет по ценам в формате Excel
-func (b *Bot) generatePriceReportExcel(chatID int64, startDate, endDate time.Time, config ReportConfig) {
+func (b *Bot) generatePriceReportExcel(chatID int64, startDate, endDate time.Time, config report.Config) {
 	ctx := context.Background()
 
 	// Получаем товары параллельно с другими операциями
@@ -1041,7 +1103,7 @@ func (b *Bot) generateStockReport(chatID int64, startDate, endDate time.Time) {
 }
 
 // generateStockReportExcel генерирует отчет по остаткам в формате Excel
-func (b *Bot) generateStockReportExcel(chatID int64, startDate, endDate time.Time, config ReportConfig) {
+func (b *Bot) generateStockReportExcel(chatID int64, startDate, endDate time.Time, config report.Config) {
 	ctx := context.Background()
 
 	// Код остается тот же, как был раньше, до создания Excel файла
@@ -1307,7 +1369,7 @@ func (b *Bot) generateStockReportExcel(chatID int64, startDate, endDate time.Tim
 }
 
 // generateStockReportPDFToFile генерирует отчет по остаткам в PDF и сохраняет его в файл
-func (b *Bot) generateStockReportPDFToFile(startDate, endDate time.Time, config ReportConfig) (string, string, error) {
+func (b *Bot) generateStockReportPDFToFile(startDate, endDate time.Time, config report.Config) (string, string, error) {
 	ctx := context.Background()
 
 	// Получаем товары и склады
@@ -1425,7 +1487,7 @@ func (b *Bot) generateStockReportPDFToFile(startDate, endDate time.Time, config 
 			continue
 		}
 
-		// Опциональная фильтрация по MinStockChangePercent из ReportConfig
+		// Опциональная фильтрация по MinStockChangePercent из report.Config
 		if config.MinStockChangePercent > 0 && totalInitialStock > 0 {
 			stockChangePercent := (float64(totalChange) / float64(totalInitialStock)) * 100
 			if stockChangePercent < config.MinStockChangePercent && stockChangePercent > -config.MinStockChangePercent {
@@ -1637,139 +1699,35 @@ func (b *Bot) generateStockReportPDFToFile(startDate, endDate time.Time, config 
 	return filePath, filename, nil
 }
 
-// generateDailyPriceReport генерирует и отправляет ежедневный отчет по ценам
+// Метод для генерации и отправки ежедневного отчета по ценам через ExcelGenerator
 func (b *Bot) generateDailyPriceReport(ctx context.Context, startDate, endDate time.Time) error {
-	// Получаем все товары с изменившейся ценой за сегодня
-	products, err := db.GetAllProducts(ctx, b.db)
-	if err != nil {
-		return fmt.Errorf("error getting products: %w", err)
-	}
+	log.Println("Генерация ежедневного отчета по ценам...")
 
-	if len(products) == 0 {
-		b.api.Send(tgbotapi.NewMessage(b.chatID, "Товары не найдены в базе данных."))
-		return nil
-	}
-
-	// Создаем новый Excel файл
-	f := excelize.NewFile()
-	sheetName := "Ежедневный отчет по ценам"
-	f.SetSheetName("Sheet1", sheetName)
-
-	// Устанавливаем заголовки
-	headers := []string{
-		"Товар", "Артикул", "Начальная цена (₽)", "Текущая цена (₽)",
-		"Изменение (₽)", "Изменение (%)",
-	}
-	for i, header := range headers {
-		cell := fmt.Sprintf("%c%d", 'A'+i, 1)
-		f.SetCellValue(sheetName, cell, header)
-	}
-
-	// Устанавливаем стиль для заголовков
-	headerStyle, _ := f.NewStyle(&excelize.Style{
-		Font:      &excelize.Font{Bold: true},
-		Fill:      excelize.Fill{Type: "pattern", Color: []string{"#DDEBF7"}, Pattern: 1},
-		Alignment: &excelize.Alignment{Horizontal: "center"},
-		Border: []excelize.Border{
-			{Type: "top", Color: "#000000", Style: 1},
-			{Type: "left", Color: "#000000", Style: 1},
-			{Type: "right", Color: "#000000", Style: 1},
-			{Type: "bottom", Color: "#000000", Style: 1},
-		},
-	})
-	f.SetCellStyle(sheetName, "A1", string(rune('A'+len(headers)-1))+"1", headerStyle)
-
-	// Заполняем данные
-	row := 2
-	productsAdded := 0
-
-	for _, product := range products {
-		// Получаем историю цен для товара за период
-		prices, err := db.GetPricesForPeriod(ctx, b.db, product.ID, startDate, endDate)
+	// Используем новый ExcelGenerator, если он доступен
+	if b.excelGenerator != nil {
+		log.Println("Используем улучшенный ExcelGenerator")
+		filePath, fileName, err := b.excelGenerator.GeneratePriceReportExcel(ctx, startDate, endDate)
 		if err != nil {
-			log.Printf("Error getting prices for product %d: %v", product.ID, err)
-			continue
+			return fmt.Errorf("ошибка при генерации отчета по ценам: %w", err)
 		}
 
-		if len(prices) <= 1 {
-			// Нет изменений цены за сегодня
-			continue
+		// Отправляем файл в Telegram
+		doc := tgbotapi.NewDocument(b.chatID, tgbotapi.FilePath(filePath))
+		doc.Caption = fmt.Sprintf("📈 Ежедневный отчет по ценам за %s",
+			startDate.Format("02.01.2006"))
+		_, err = b.api.Send(doc)
+		if err != nil {
+			return fmt.Errorf("ошибка при отправке отчета: %w", err)
 		}
 
-		// Первая и последняя цена за период
-		firstPrice := prices[0].FinalPrice
-		lastPrice := prices[len(prices)-1].FinalPrice
+		// Удаляем временный файл
+		// os.Remove(filePath)
 
-		// Если цена не изменилась, пропускаем товар
-		if firstPrice == lastPrice {
-			continue
-		}
-
-		// Рассчитываем изменение цены за период
-		priceChange := lastPrice - firstPrice
-		priceChangePercent := float64(0)
-		if firstPrice > 0 {
-			priceChangePercent = float64(priceChange) / float64(firstPrice) * 100
-		}
-
-		// Добавляем данные в Excel
-		f.SetCellValue(sheetName, fmt.Sprintf("A%d", row), product.Name)
-		f.SetCellValue(sheetName, fmt.Sprintf("B%d", row), product.VendorCode)
-		f.SetCellValue(sheetName, fmt.Sprintf("C%d", row), float64(firstPrice)/100)
-		f.SetCellValue(sheetName, fmt.Sprintf("D%d", row), float64(lastPrice)/100)
-		f.SetCellValue(sheetName, fmt.Sprintf("E%d", row), float64(priceChange)/100)
-		f.SetCellValue(sheetName, fmt.Sprintf("F%d", row), priceChangePercent)
-
-		row++
-		productsAdded++
-	}
-
-	// Если нет изменений в ценах за сегодня, отправляем уведомление и выходим
-	if productsAdded == 0 {
-		b.api.Send(tgbotapi.NewMessage(b.chatID, "За сегодня не было изменений в ценах товаров."))
 		return nil
 	}
 
-	// Автонастройка ширины столбцов
-	for i := range headers {
-		col := string(rune('A' + i))
-		width, _ := f.GetColWidth(sheetName, col)
-		if width < 15 {
-			f.SetColWidth(sheetName, col, col, 15)
-		}
-	}
-
-	// Устанавливаем стиль для чисел
-	numberStyle, _ := f.NewStyle(&excelize.Style{
-		NumFmt: 2, // Формат с двумя десятичными знаками
-	})
-	f.SetCellStyle(sheetName, "C2", fmt.Sprintf("E%d", row-1), numberStyle)
-
-	// Устанавливаем стиль для процентов
-	percentStyle, _ := f.NewStyle(&excelize.Style{
-		NumFmt: 10, // Процентный формат
-	})
-	f.SetCellStyle(sheetName, "F2", fmt.Sprintf("F%d", row-1), percentStyle)
-
-	// Сохраняем файл
-	filename := fmt.Sprintf("daily_price_report_%s.xlsx", startDate.Format("02-01-2006"))
-	filepath := filepath.Join(os.TempDir(), filename)
-	if err := f.SaveAs(filepath); err != nil {
-		return fmt.Errorf("error saving Excel file: %w", err)
-	}
-
-	// Отправляем файл в Telegram
-	doc := tgbotapi.NewDocument(b.chatID, tgbotapi.FilePath(filepath))
-	doc.Caption = fmt.Sprintf("📈 Ежедневный отчет по изменениям цен за %s",
-		startDate.Format("02.01.2006"))
-	_, err = b.api.Send(doc)
-	if err != nil {
-		return fmt.Errorf("error sending Excel file: %w", err)
-	}
-
-	// Удаляем временный файл
-	os.Remove(filepath)
-	return nil
+	// Используем старый метод, если новый генератор недоступен
+	return b.generateDailyPriceReportLegacy(ctx, startDate, endDate)
 }
 
 // generateDailyStockReport генерирует и отправляет ежедневный отчет по остаткам
@@ -1918,76 +1876,9 @@ func (b *Bot) generateDailyStockReport(ctx context.Context, startDate, endDate t
 	return nil
 }
 
-// generateReportFile генерирует отчёт за заданный период и сохраняет его в файл,
-// возвращая путь к файлу, имя отчёта и ошибку, если она произошла.
-func (b *Bot) generateReportFile(reportType, period, format string) (filePath, reportName string, err error) {
-	var startDate, endDate time.Time
-	now := time.Now()
-
-	// Расчёт начала и конца периода
-	if strings.HasPrefix(period, "custom_") {
-		parts := strings.Split(period, "_")
-		if len(parts) != 3 {
-			return "", "", fmt.Errorf("неверный формат кастомного периода: %s", period)
-		}
-
-		startDateStr, endDateStr := parts[1], parts[2]
-
-		// Парсим даты из кастомного периода
-		startDate, err = time.ParseInLocation("02-01-2006", startDateStr, now.Location())
-		if err != nil {
-			return "", "", fmt.Errorf("ошибка парсинга начальной даты: %v", err)
-		}
-
-		endDate, err = time.ParseInLocation("02-01-2006", endDateStr, now.Location())
-		if err != nil {
-			return "", "", fmt.Errorf("ошибка парсинга конечной даты: %v", err)
-		}
-
-		// Устанавливаем конец дня для конечной даты
-		endDate = time.Date(endDate.Year(), endDate.Month(), endDate.Day(), 23, 59, 59, 999999999, endDate.Location())
-	} else {
-		switch period {
-		case "day":
-			startDate = time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
-			endDate = now
-		case "week":
-			startDate = now.AddDate(0, 0, -7)
-			endDate = now
-		case "month":
-			startDate = now.AddDate(0, -1, 0)
-			endDate = now
-		default:
-			return "", "", fmt.Errorf("неизвестный период: %s", period)
-		}
-	}
-
-	// Добавляем логирование для отладки
-	log.Printf("Генерация отчета типа=%s, период=%s, формат=%s, startDate=%s, endDate=%s",
-		reportType, period, format, startDate.Format("02-01-2006"), endDate.Format("02-01-2006"))
-
-	// Генерация отчёта в зависимости от типа и формата
-	switch reportType {
-	case "prices":
-		if format == "excel" {
-			return b.generatePriceReportExcelToFile(startDate, endDate, b.config)
-		} else if format == "pdf" {
-			return b.generatePriceReportPDFToFile(startDate, endDate, b.config)
-		}
-	case "stocks":
-		if format == "excel" {
-			return b.generateStockReportExcelToFile(startDate, endDate, b.config)
-		} else if format == "pdf" {
-			return b.generateStockReportPDFToFile(startDate, endDate, b.config)
-		}
-	}
-
-	return "", "", fmt.Errorf("неизвестный тип отчёта или формат")
-}
-
 // generatePriceReportExcelToFile генерирует отчет по ценам в формате Excel и сохраняет его во временный файл.
 // Возвращает путь к файлу, имя отчета и ошибку (если возникнет).
-func (b *Bot) generatePriceReportExcelToFile(startDate, endDate time.Time, config ReportConfig) (string, string, error) {
+func (b *Bot) generatePriceReportExcelToFile(startDate, endDate time.Time, config report.Config) (string, string, error) {
 	ctx := context.Background()
 
 	products, err := db.GetAllProducts(ctx, b.db)
@@ -2106,7 +1997,7 @@ func (b *Bot) generatePriceReportExcelToFile(startDate, endDate time.Time, confi
 	return filePath, filename, nil
 }
 
-func (b *Bot) generateStockReportExcelToFile(startDate, endDate time.Time, config ReportConfig) (string, string, error) {
+func (b *Bot) generateStockReportExcelToFile(startDate, endDate time.Time, config report.Config) (string, string, error) {
 	ctx := context.Background()
 
 	// Получаем все товары из базы данных
@@ -2302,7 +2193,7 @@ func (b *Bot) generateStockReportExcelToFile(startDate, endDate time.Time, confi
 	return filePath, filename, nil
 }
 
-func (b *Bot) generatePriceReportPDFToFile(startDate, endDate time.Time, config ReportConfig) (string, string, error) {
+func (b *Bot) generatePriceReportPDFToFile(startDate, endDate time.Time, config report.Config) (string, string, error) {
 	ctx := context.Background()
 
 	// Получаем список всех товаров из базы данных
@@ -2498,7 +2389,7 @@ func (b *Bot) generatePriceReportPDFToFile(startDate, endDate time.Time, config 
 }
 
 // generatePriceReportPDF генерирует отчет по ценам в формате PDF
-func (b *Bot) generatePriceReportPDF(chatID int64, startDate, endDate time.Time, config ReportConfig) {
+func (b *Bot) generatePriceReportPDF(chatID int64, startDate, endDate time.Time, config report.Config) {
 	ctx := context.Background()
 
 	// Получаем данные товаров из БД
@@ -2816,7 +2707,7 @@ func (b *Bot) generatePriceReportPDF(chatID int64, startDate, endDate time.Time,
 }
 
 // generateStockReportPDF генерирует отчет по складским запасам в формате PDF
-func (b *Bot) generateStockReportPDF(chatID int64, startDate, endDate time.Time, config ReportConfig) {
+func (b *Bot) generateStockReportPDF(chatID int64, startDate, endDate time.Time, config report.Config) {
 	ctx := context.Background()
 
 	// Получаем данные о товарах и складах

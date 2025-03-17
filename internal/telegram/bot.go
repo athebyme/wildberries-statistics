@@ -5,10 +5,13 @@ import (
 	"fmt"
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"github.com/jmoiron/sqlx"
+	"gopkg.in/mail.v2"
 	"log"
 	"os"
+	"strconv"
 	"strings"
 	"time"
+	"wbmonitoring/monitoring/internal/telegram/report"
 )
 
 // Bot представляет Telegram-бота
@@ -17,16 +20,15 @@ type Bot struct {
 	chatID       int64
 	db           *sqlx.DB
 	allowedUsers map[int64]bool
-	config       ReportConfig
+	config       report.Config
 	userStates   map[int64]string
+
+	emailService   *EmailService
+	pdfGenerator   *report.PDFGenerator
+	excelGenerator *report.ExcelGenerator
 }
 
-type ReportConfig struct {
-	MinPriceChangePercent float64 `json:"minPriceChangePercent"`
-	MinStockChangePercent float64 `json:"minStockChangePercent"`
-}
-
-func NewBot(token string, chatID int64, db *sqlx.DB, allowedUserIDs []int64, config ReportConfig) (*Bot, error) {
+func NewBot(token string, chatID int64, db *sqlx.DB, allowedUserIDs []int64, config report.Config) (*Bot, error) {
 	api, err := tgbotapi.NewBotAPI(token)
 	if err != nil {
 		return nil, fmt.Errorf("initializing telegram bot: %w", err)
@@ -44,11 +46,27 @@ func NewBot(token string, chatID int64, db *sqlx.DB, allowedUserIDs []int64, con
 		allowedUsers: allowedUsers,
 		config:       config,
 		userStates:   make(map[int64]string),
+
+		// Новые сервисы инициализируются как nil и могут быть установлены позже
+		// через метод UpdateReportServices
+		emailService:   nil,
+		pdfGenerator:   nil,
+		excelGenerator: nil,
 	}
+
 	if err := bot.Initialize(); err != nil {
 		return nil, err
 	}
+
 	return bot, nil
+}
+
+// UpdateReportServices обновляет сервисы отчетов для телеграм-бота
+func (b *Bot) UpdateReportServices(emailService *EmailService, pdfGenerator *report.PDFGenerator, excelGenerator *report.ExcelGenerator) error {
+	b.emailService = emailService
+	b.pdfGenerator = pdfGenerator
+	b.excelGenerator = excelGenerator
+	return nil
 }
 
 func (b *Bot) StartBot(ctx context.Context) {
@@ -171,7 +189,16 @@ func (b *Bot) handleCallbackQuery(query *tgbotapi.CallbackQuery) {
 	// Обработка сохранения/несохранения email
 	if strings.HasPrefix(query.Data, "save_email_") {
 		email := strings.TrimPrefix(query.Data, "save_email_")
-		err := b.saveUserEmail(query.From.ID, email)
+
+		// Используем EmailService для сохранения, если он доступен
+		var err error
+		if b.emailService != nil {
+			err = b.emailService.SaveUserEmail(query.From.ID, email)
+		} else {
+			// Обратная совместимость - используем старый метод
+			err = b.saveUserEmailLegacy(query.From.ID, email)
+		}
+
 		if err != nil {
 			log.Printf("Ошибка при сохранении email: %v", err)
 			b.api.Send(tgbotapi.NewMessage(query.Message.Chat.ID, "Не удалось сохранить email. Попробуйте позже."))
@@ -193,7 +220,16 @@ func (b *Bot) handleCallbackQuery(query *tgbotapi.CallbackQuery) {
 			reportType := parts[3]
 			period := parts[4]
 
-			email, err := b.getUserEmail(query.From.ID)
+			// Получаем email через EmailService, если он доступен
+			var email string
+			var err error
+			if b.emailService != nil {
+				email, err = b.emailService.GetUserEmail(query.From.ID)
+			} else {
+				// Обратная совместимость - используем старый метод
+				email, err = b.getUserEmailLegacy(query.From.ID)
+			}
+
 			if err != nil || email == "" {
 				b.api.Send(tgbotapi.NewMessage(query.Message.Chat.ID, "Не удалось получить сохраненный email. Введите новый адрес."))
 				b.requestEmailInput(query.Message.Chat.ID, reportType, period)
@@ -216,7 +252,7 @@ func (b *Bot) handleCallbackQuery(query *tgbotapi.CallbackQuery) {
 		return
 	}
 
-	// Остальной ваш код обработки callback запросов...
+	// Остальная обработка callback запросов...
 	parts := strings.Split(query.Data, "_")
 
 	// Обработка выбора типа отчета
@@ -255,7 +291,7 @@ func (b *Bot) handleCallbackQuery(query *tgbotapi.CallbackQuery) {
 				return
 			}
 
-			// Обработка обычного формата
+			// Обработка обычного формата (PDF или Excel)
 			b.generateReport(query.Message.Chat.ID, reportType, period, format)
 			return
 		}
@@ -437,75 +473,6 @@ func (b *Bot) sendFormatSelection(chatID int64, reportType string, period string
 	b.api.Send(msg)
 }
 
-// handleMessage обрабатывает входящие сообщения
-func (b *Bot) handleMessage(message *tgbotapi.Message) {
-	// Проверяем, находится ли пользователь в состоянии ожидания ввода произвольного периода
-	state := b.getUserState(message.Chat.ID)
-	if strings.HasPrefix(state, "waiting_custom_period_") {
-		// Извлекаем тип отчета из состояния
-		reportType := strings.TrimPrefix(state, "waiting_custom_period_")
-
-		// Обрабатываем ввод периода
-		startDate, endDate, err := b.parseCustomPeriod(message.Text)
-		if err != nil {
-			msg := tgbotapi.NewMessage(message.Chat.ID, fmt.Sprintf("Ошибка: %s\nПожалуйста, введите период в формате ДД.ММ.ГГГГ-ДД.ММ.ГГГГ", err.Error()))
-			b.api.Send(msg)
-			return
-		}
-
-		// Форматируем период для использования в callback data
-		// Используем формат "startYYYYMMDD_endYYYYMMDD"
-		periodCode := fmt.Sprintf("custom_%s_%s",
-			startDate.Format("02.01.2006"),
-			endDate.Format("02.01.2006"))
-
-		// Очищаем состояние пользователя
-		b.clearUserState(message.Chat.ID)
-
-		// Отправляем сообщение о выбранном периоде
-		confirmMsg := tgbotapi.NewMessage(message.Chat.ID,
-			fmt.Sprintf("Выбран период с %s по %s",
-				startDate.Format("02.01.2006"),
-				endDate.Format("02.01.2006")))
-		b.api.Send(confirmMsg)
-
-		// Отправляем выбор формата для отчета
-		b.sendFormatSelection(message.Chat.ID, reportType, periodCode)
-	} else if strings.HasPrefix(state, "waiting_email_") {
-		// Извлекаем параметры из состояния
-		parts := strings.Split(state, "_")
-		if len(parts) >= 3 {
-			reportType := parts[2]
-			period := parts[3]
-
-			// Проверяем валидность введенного email
-			if !isValidEmail(message.Text) {
-				msg := tgbotapi.NewMessage(message.Chat.ID, "Пожалуйста, введите корректный адрес электронной почты.")
-				b.api.Send(msg)
-				return
-			}
-
-			// Отправляем отчет на введенный email
-			b.sendReportToEmail(message.Chat.ID, message.From.ID, reportType, period, message.Text)
-			return
-		}
-	} else {
-		switch message.Command() {
-		case "start":
-			b.sendWelcomeMessage(message.Chat.ID)
-		case "report":
-			b.sendReportMenu(message.Chat.ID)
-		case "help":
-			b.sendHelpMessage(message.Chat.ID)
-		default:
-			// Если это не команда, просто отправляем меню отчетов
-			if message.Text != "" {
-				b.sendReportMenu(message.Chat.ID)
-			}
-		}
-	}
-}
-
 // SendDailyReport отправляет ежедневный отчет по ценам и остаткам в чат
 func (b *Bot) SendDailyReport(ctx context.Context) error {
 	// Определяем даты для отчета: сегодня с 00:00 до текущего момента
@@ -600,6 +567,7 @@ func (b *Bot) requestEmailInput(chatID int64, reportType string, period string) 
 	b.setUserState(chatID, fmt.Sprintf("waiting_email_%s_%s", reportType, period))
 }
 
+// Обновленный метод для отправки отчета на email
 func (b *Bot) sendReportToEmail(chatID int64, userID int64, reportType, period, email string) {
 	// Отправляем сообщение о начале генерации отчета
 	msg := tgbotapi.NewMessage(chatID, "Генерирую отчет...")
@@ -627,7 +595,7 @@ func (b *Bot) sendReportToEmail(chatID int64, userID int64, reportType, period, 
 		}
 	}
 
-	// Генерируем отчет (предполагаем Excel формат для email)
+	// Генерируем отчет и получаем путь к файлу
 	filePath, reportName, err := b.generateReportFile(reportType, period, "excel")
 	if err != nil {
 		log.Printf("Ошибка при генерации отчета: %v", err)
@@ -638,20 +606,33 @@ func (b *Bot) sendReportToEmail(chatID int64, userID int64, reportType, period, 
 		return
 	}
 
-	// Отправляем email
-	err = b.sendEmail(email, reportType, displayPeriod, filePath, reportName)
-	if err != nil {
-		log.Printf("Ошибка при отправке email: %v", err)
+	// Отправляем email, используя EmailService, если он доступен
+	var sendErr error
+	if b.emailService != nil {
+		sendErr = b.emailService.SendReportEmail(email, reportType, displayPeriod, filePath, reportName)
+	} else {
+		// Обратная совместимость - используем старый метод
+		sendErr = b.sendEmailLegacy(email, reportType, displayPeriod, filePath, reportName)
+	}
+
+	if sendErr != nil {
+		log.Printf("Ошибка при отправке email: %v", sendErr)
 		b.api.Send(tgbotapi.NewEditMessageText(
 			chatID, sentMsg.MessageID,
-			fmt.Sprintf("Ошибка при отправке отчета: %v", err),
+			fmt.Sprintf("Ошибка при отправке отчета: %v", sendErr),
 		))
 		return
 	}
 
 	// Спрашиваем, хочет ли пользователь сохранить email
-	savedEmail, _ := b.getUserEmail(userID)
-	if savedEmail != email {
+	var savedEmail string
+	if b.emailService != nil {
+		savedEmail, err = b.emailService.GetUserEmail(userID)
+	} else {
+		savedEmail, err = b.getUserEmailLegacy(userID)
+	}
+
+	if (err == nil || err.Error() == "sql: no rows in result set") && savedEmail != email {
 		keyboard := tgbotapi.NewInlineKeyboardMarkup(
 			tgbotapi.NewInlineKeyboardRow(
 				tgbotapi.NewInlineKeyboardButtonData("Да", fmt.Sprintf("save_email_%s", email)),
@@ -678,11 +659,300 @@ func (b *Bot) sendReportToEmail(chatID int64, userID int64, reportType, period, 
 	defer os.Remove(filePath)
 }
 
+// Устаревший метод для сохранения email (для обратной совместимости)
+func (b *Bot) saveUserEmailLegacy(userID int64, email string) error {
+	// Проверяем, есть ли уже запись для этого пользователя
+	var count int
+	err := b.db.Get(&count, "SELECT count(*) FROM user_emails WHERE user_id = $1", userID)
+	if err != nil {
+		return err
+	}
+	if count == 0 {
+		// Если записи нет, создаем новую
+		_, err = b.db.Exec(
+			"INSERT INTO user_emails (user_id, email) VALUES ($1, $2)",
+			userID, email)
+		return err
+	}
+
+	// Если запись есть, обновляем ее
+	_, err = b.db.Exec(
+		"UPDATE user_emails SET email = $1, updated_at = NOW() WHERE user_id = $2",
+		email, userID)
+	return err
+}
+
+// Устаревший метод для получения email (для обратной совместимости)
+func (b *Bot) getUserEmailLegacy(userID int64) (string, error) {
+	var email string
+	err := b.db.Get(&email, "SELECT email FROM user_emails WHERE user_id = $1", userID)
+	if err != nil {
+		if err.Error() == "sql: no rows in result set" {
+			return "", nil // Пользователь не имеет сохраненного адреса
+		}
+		return "", err
+	}
+	return email, nil
+}
+
+// Устаревший метод для отправки email (для обратной совместимости)
+func (b *Bot) sendEmailLegacy(to string, reportType string, period string, filePath string, reportName string) error {
+	// Настройки SMTP сервера
+	smtpHost := os.Getenv("SMTP_HOST")
+	if smtpHost == "" {
+		return fmt.Errorf("SMTP_HOST не установлен")
+	}
+
+	smtpPortStr := os.Getenv("SMTP_PORT")
+	if smtpPortStr == "" {
+		smtpPortStr = "587" // Порт по умолчанию для большинства SMTP серверов
+	}
+
+	smtpPort, err := strconv.Atoi(smtpPortStr)
+	if err != nil {
+		return fmt.Errorf("неверный формат SMTP_PORT: %v", err)
+	}
+
+	// Создаем новое сообщение
+	m := mail.NewMessage()
+	m.SetHeader("From", "noreply@athebyme-market.ru")
+	m.SetHeader("To", to)
+
+	// Формируем тему в зависимости от типа отчета
+	var subject string
+	if reportType == "prices" {
+		subject = "Отчет по ценам"
+	} else {
+		subject = "Отчет по остаткам"
+	}
+	m.SetHeader("Subject", subject)
+
+	// Добавляем текст сообщения
+	m.SetBody("text/plain", fmt.Sprintf("Отчет %s за период %s", subject, period))
+
+	// Прикрепляем файл отчета
+	m.Attach(filePath, mail.Rename(reportName))
+
+	// Проверяем существование файла
+	if _, err := os.Stat(filePath); os.IsNotExist(err) {
+		return fmt.Errorf("файл отчета не существует: %s", filePath)
+	}
+
+	// Создаем dialer с пустыми учетными данными для MailHog
+	d := mail.NewDialer(smtpHost, smtpPort, "", "")
+
+	// Отключаем SSL и StartTLS для MailHog
+	d.SSL = false
+	d.TLSConfig = nil
+	d.StartTLSPolicy = mail.MandatoryStartTLS
+
+	// Добавляем логирование перед отправкой
+	log.Printf("Отправка email на %s через SMTP сервер %s:%d", to, smtpHost, smtpPort)
+
+	return d.DialAndSend(m)
+}
+
+// generateReportFile генерирует отчёт за заданный период и сохраняет его в файл,
+// возвращая путь к файлу, имя отчёта и ошибку, если она произошла.
+func (b *Bot) generateReportFile(reportType, period, format string) (string, string, error) {
+	var startDate, endDate time.Time
+	now := time.Now()
+
+	// Расчёт начала и конца периода
+	if strings.HasPrefix(period, "custom_") {
+		parts := strings.Split(period, "_")
+		if len(parts) != 3 {
+			return "", "", fmt.Errorf("неверный формат кастомного периода: %s", period)
+		}
+
+		startDateStr, endDateStr := parts[1], parts[2]
+
+		// Парсим даты из кастомного периода
+		var err error
+		startDate, err = time.ParseInLocation("02.01.2006", startDateStr, now.Location())
+		if err != nil {
+			return "", "", fmt.Errorf("ошибка парсинга начальной даты: %v", err)
+		}
+
+		endDate, err = time.ParseInLocation("02.01.2006", endDateStr, now.Location())
+		if err != nil {
+			return "", "", fmt.Errorf("ошибка парсинга конечной даты: %v", err)
+		}
+
+		// Устанавливаем конец дня для конечной даты
+		endDate = time.Date(endDate.Year(), endDate.Month(), endDate.Day(), 23, 59, 59, 999999999, endDate.Location())
+	} else {
+		switch period {
+		case "day":
+			startDate = time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+			endDate = now
+		case "week":
+			startDate = now.AddDate(0, 0, -7)
+			endDate = now
+		case "month":
+			startDate = now.AddDate(0, -1, 0)
+			endDate = now
+		default:
+			return "", "", fmt.Errorf("неизвестный период: %s", period)
+		}
+	}
+
+	// Генерация отчёта в зависимости от типа и формата
+	ctx := context.Background()
+
+	if reportType == "prices" {
+		if format == "excel" {
+			// Используем новый Excel генератор если он доступен
+			if b.excelGenerator != nil {
+				return b.excelGenerator.GeneratePriceReportExcel(ctx, startDate, endDate)
+			}
+			// Иначе используем старый метод
+			return b.generatePriceReportExcelToFile(startDate, endDate, b.config)
+		} else if format == "pdf" {
+			// Используем новый PDF генератор если он доступен
+			if b.pdfGenerator != nil {
+				return b.pdfGenerator.GeneratePriceReportPDF(ctx, startDate, endDate, b.config.MinPriceChangePercent)
+			}
+			// Иначе используем старый метод
+			return b.generatePriceReportPDFToFile(startDate, endDate, b.config)
+		}
+	} else if reportType == "stocks" {
+		if format == "excel" {
+			// Используем новый Excel генератор если он доступен
+			if b.excelGenerator != nil {
+				return b.excelGenerator.GenerateStockReportExcel(ctx, startDate, endDate)
+			}
+			// Иначе используем старый метод
+			return b.generateStockReportExcelToFile(startDate, endDate, b.config)
+		} else if format == "pdf" {
+			// Используем новый PDF генератор если он доступен
+			if b.pdfGenerator != nil {
+				return b.pdfGenerator.GenerateStockReportPDF(ctx, startDate, endDate, b.config.MinStockChangePercent)
+			}
+			// Иначе используем старый метод
+			return b.generateStockReportPDFToFile(startDate, endDate, b.config)
+		}
+	}
+
+	return "", "", fmt.Errorf("неизвестный тип отчёта или формат")
+}
+
+// Обновленный метод handleMessage
+func (b *Bot) handleMessage(message *tgbotapi.Message) {
+	// Проверяем, находится ли пользователь в состоянии ожидания ввода произвольного периода
+	state := b.getUserState(message.Chat.ID)
+	if strings.HasPrefix(state, "waiting_custom_period_") {
+		// Извлекаем тип отчета из состояния
+		reportType := strings.TrimPrefix(state, "waiting_custom_period_")
+
+		// Обрабатываем ввод периода
+		startDate, endDate, err := b.parseCustomPeriod(message.Text)
+		if err != nil {
+			msg := tgbotapi.NewMessage(message.Chat.ID, fmt.Sprintf("Ошибка: %s\nПожалуйста, введите период в формате ДД.ММ.ГГГГ-ДД.ММ.ГГГГ", err.Error()))
+			b.api.Send(msg)
+			return
+		}
+
+		// Форматируем период для использования в callback data
+		periodCode := fmt.Sprintf("custom_%s_%s",
+			startDate.Format("02.01.2006"),
+			endDate.Format("02.01.2006"))
+
+		// Очищаем состояние пользователя
+		b.clearUserState(message.Chat.ID)
+
+		// Отправляем сообщение о выбранном периоде
+		confirmMsg := tgbotapi.NewMessage(message.Chat.ID,
+			fmt.Sprintf("Выбран период с %s по %s",
+				startDate.Format("02.01.2006"),
+				endDate.Format("02.01.2006")))
+		b.api.Send(confirmMsg)
+
+		// Отправляем выбор формата для отчета
+		b.sendFormatSelection(message.Chat.ID, reportType, periodCode)
+	} else if strings.HasPrefix(state, "waiting_email_") {
+		// Извлекаем параметры из состояния
+		parts := strings.Split(state, "_")
+		if len(parts) >= 3 {
+			reportType := parts[2]
+			period := parts[3]
+
+			// Проверяем валидность введенного email
+			var isValid bool
+			if b.emailService != nil {
+				isValid = isValidEmail(message.Text)
+			} else {
+				isValid = isValidEmail(message.Text)
+			}
+
+			if !isValid {
+				msg := tgbotapi.NewMessage(message.Chat.ID, "Пожалуйста, введите корректный адрес электронной почты.")
+				b.api.Send(msg)
+				return
+			}
+
+			// Отправляем отчет на введенный email
+			b.sendReportToEmail(message.Chat.ID, message.From.ID, reportType, period, message.Text)
+			return
+		}
+	} else {
+		switch message.Command() {
+		case "start":
+			b.sendWelcomeMessage(message.Chat.ID)
+		case "report":
+			b.sendReportMenu(message.Chat.ID)
+		case "help":
+			b.sendHelpMessage(message.Chat.ID)
+		default:
+			// Если это не команда, просто отправляем меню отчетов
+			if message.Text != "" {
+				b.sendReportMenu(message.Chat.ID)
+			}
+		}
+	}
+}
+
+// Initialize initializes the bot and its dependencies
 func (b *Bot) Initialize() error {
 	// Инициализация таблицы для хранения email адресов
 	if err := b.initializeEmailStorage(); err != nil {
 		return fmt.Errorf("ошибка инициализации хранилища email: %w", err)
 	}
+	return nil
+}
+
+// initializeEmailStorage creates the email storage table if it doesn't exist
+func (b *Bot) initializeEmailStorage() error {
+	// If we have an EmailService, delegate email storage initialization to it
+	if b.emailService != nil {
+		log.Printf("Используется EmailService для инициализации хранилища email")
+		return nil // EmailService handles its own initialization in its constructor
+	}
+
+	// Legacy initialization if EmailService is not available
+	log.Printf("Используется прямая инициализация хранилища email")
+	_, err := b.db.Exec(`
+		CREATE TABLE IF NOT EXISTS user_emails (
+			user_id BIGINT PRIMARY KEY,
+			email TEXT NOT NULL,
+			created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+			updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+		)
+	`)
+	if err != nil {
+		return fmt.Errorf("ошибка создания таблицы user_emails: %w", err)
+	}
 
 	return nil
+}
+
+// getUserEmail is a unified method to get user email that works with both approaches
+func (b *Bot) getUserEmail(userID int64) (string, error) {
+	// Try using EmailService if available
+	if b.emailService != nil {
+		return b.emailService.GetUserEmail(userID)
+	}
+
+	// Fall back to legacy method
+	return b.getUserEmailLegacy(userID)
 }
