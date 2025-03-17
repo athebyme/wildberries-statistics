@@ -48,11 +48,11 @@ func addDynamicChangesSheet(
 	var headers []string
 	if isPriceReport {
 		headers = []string{
-			"Товар", "Артикул", "Дата", "Цена до (₽)", "Цена после (₽)", "Изменение (₽)", "Изменение (%)", "Скидка МП (%)",
+			"Товар", "Артикул", "Период", "Цена до (₽)", "Цена после (₽)", "Изменение (₽)", "Изменение (%)", "Скидка МП (%)",
 		}
 	} else {
 		headers = []string{
-			"Товар", "Артикул", "Склад", "Дата", "Остаток до (шт.)", "Остаток после (шт.)", "Изменение (шт.)", "Изменение (%)",
+			"Товар", "Артикул", "Склад", "Период", "Остаток до (шт.)", "Остаток после (шт.)", "Изменение (шт.)", "Изменение (%)",
 		}
 	}
 
@@ -75,13 +75,8 @@ func addDynamicChangesSheet(
 	})
 	f.SetCellStyle(sheetName, "A1", string(rune('A'+len(headers)-1))+"1", headerStyle)
 
-	// Заполняем данные
-	row := 2
-	productsAdded := 0
-
 	// Для параллельной обработки
 	var wg sync.WaitGroup
-	var _ sync.Mutex // Для безопасного доступа к Excel-файлу
 
 	// Канал для результатов
 	type processResult struct {
@@ -90,7 +85,10 @@ func addDynamicChangesSheet(
 	}
 	resultChan := make(chan processResult, len(products))
 
-	// Для отчета по остаткам - обрабатываем каждый склад отдельно
+	// Заполняем данные
+	row := 2
+	productsAdded := 0
+
 	if isPriceReport {
 		// Обрабатываем цены параллельно
 		for _, product := range products {
@@ -126,25 +124,42 @@ func addDynamicChangesSheet(
 				var rows [][]interface{}
 				firstEntryForProduct := true
 
+				// Оптимизированный алгоритм для объединения периодов без изменений
+				var periodStart time.Time = prices[0].RecordedAt
+				var currentPrice int = prices[0].FinalPrice
+				var currentOrigPrice int = prices[0].Price
+
 				for i := 1; i < len(prices); i++ {
-					prevPrice := prices[i-1].FinalPrice
-					currPrice := prices[i].FinalPrice
+					// Если цена изменилась или это последняя запись
+					if prices[i].FinalPrice != currentPrice || i == len(prices)-1 {
+						// Если цена изменилась, добавляем запись о периоде
 
-					// Рассчитываем изменение цены
-					priceChange := currPrice - prevPrice
+						// Если это последняя запись и цена не изменилась, обновляем время окончания периода
+						periodEnd := prices[i-1].RecordedAt
+						if i == len(prices)-1 && prices[i].FinalPrice == currentPrice {
+							periodEnd = prices[i].RecordedAt
+						}
 
-					// Добавляем только если есть изменение цены или это первая запись
-					if priceChange != 0 || i == 1 {
+						// Форматируем период как "01.02.2023 12:34 - 02.02.2023 15:45"
+						periodStr := periodStart.Format("02.01.2006 15:04")
+						if !periodStart.Equal(periodEnd) {
+							periodStr += " - " + periodEnd.Format("02.01.2006 15:04")
+						}
+
+						// Если следующая цена отличается, вычисляем изменение
+						nextPrice := prices[i].FinalPrice
+						priceChange := nextPrice - currentPrice
+
 						// Расчет процента изменения
 						changePercent := 0.0
-						if prevPrice > 0 {
-							changePercent = float64(priceChange) / float64(prevPrice) * 100
+						if currentPrice > 0 {
+							changePercent = float64(priceChange) / float64(currentPrice) * 100
 						}
 
 						// Расчет скидки маркетплейса
 						marketplaceDiscount := 0.0
-						if prices[i].Price > 0 {
-							marketplaceDiscount = float64(prices[i].FinalPrice) / float64(prices[i].Price) * 100
+						if currentOrigPrice > 0 {
+							marketplaceDiscount = float64(currentPrice) / float64(currentOrigPrice) * 100
 						}
 
 						// Формируем строку для отчета
@@ -160,14 +175,25 @@ func addDynamicChangesSheet(
 							row[1] = ""
 						}
 
-						row[2] = prices[i].RecordedAt.Format("02.01.2006 15:04")
-						row[3] = prevPrice
-						row[4] = currPrice
+						row[2] = periodStr
+						row[3] = currentPrice
+						row[4] = nextPrice
 						row[5] = priceChange
 						row[6] = changePercent
 						row[7] = marketplaceDiscount
 
-						rows = append(rows, row)
+						// Добавляем строку только если есть изменение цены
+						if i < len(prices) && priceChange != 0 {
+							rows = append(rows, row)
+						} else if i == len(prices)-1 && len(rows) == 0 {
+							// Если это последняя запись и у нас еще нет строк (случай одной цены на весь период)
+							rows = append(rows, row)
+						}
+
+						// Обновляем значения для следующего периода
+						periodStart = prices[i].RecordedAt
+						currentPrice = prices[i].FinalPrice
+						currentOrigPrice = prices[i].Price
 					}
 				}
 
@@ -215,45 +241,72 @@ func addDynamicChangesSheet(
 					var rows [][]interface{}
 					firstEntryForProduct := true
 
-					// Если товар попал в отчет, выводим ВСЕ изменения его остатков
+					// Оптимизированный алгоритм для объединения периодов без изменений остатков
+					var periodStart time.Time = stocks[0].RecordedAt
+					var currentStock int = stocks[0].Amount
+
 					for i := 1; i < len(stocks); i++ {
-						prevStock := stocks[i-1].Amount
-						currStock := stocks[i].Amount
+						// Если остаток изменился или это последняя запись
+						if stocks[i].Amount != currentStock || i == len(stocks)-1 {
+							// Если остаток изменился, добавляем запись о периоде
 
-						// Рассчитываем изменение остатка
-						stockChange := currStock - prevStock
+							// Если это последняя запись и остаток не изменился, обновляем время окончания периода
+							periodEnd := stocks[i-1].RecordedAt
+							if i == len(stocks)-1 && stocks[i].Amount == currentStock {
+								periodEnd = stocks[i].RecordedAt
+							}
 
-						// Выводим ВСЕ записи для подозрительных товаров
-						// Расчет процента изменения
-						changePercent := 0.0
-						if prevStock > 0 {
-							changePercent = float64(stockChange) / float64(prevStock) * 100
-						} else if prevStock == 0 && currStock > 0 {
-							changePercent = 100.0
+							// Форматируем период
+							periodStr := periodStart.Format("02.01.2006 15:04")
+							if !periodStart.Equal(periodEnd) {
+								periodStr += " - " + periodEnd.Format("02.01.2006 15:04")
+							}
+
+							// Если следующий остаток отличается, вычисляем изменение
+							nextStock := stocks[i].Amount
+							stockChange := nextStock - currentStock
+
+							// Расчет процента изменения
+							changePercent := 0.0
+							if currentStock > 0 {
+								changePercent = float64(stockChange) / float64(currentStock) * 100
+							} else if currentStock == 0 && nextStock > 0 {
+								changePercent = 100.0
+							}
+
+							// Формируем строку для отчета
+							row := make([]interface{}, 8) // 8 колонок
+
+							// Если это первая запись для данного товара, добавляем имя и артикул
+							if firstEntryForProduct {
+								row[0] = prod.Name
+								row[1] = prod.VendorCode
+								row[2] = wh.Name
+								firstEntryForProduct = false
+							} else {
+								row[0] = ""
+								row[1] = ""
+								row[2] = ""
+							}
+
+							row[3] = periodStr
+							row[4] = currentStock
+							row[5] = nextStock
+							row[6] = stockChange
+							row[7] = changePercent
+
+							// Добавляем строку только если есть изменение остатка
+							if i < len(stocks) && stockChange != 0 {
+								rows = append(rows, row)
+							} else if i == len(stocks)-1 && len(rows) == 0 {
+								// Если это последняя запись и у нас еще нет строк (случай одного остатка на весь период)
+								rows = append(rows, row)
+							}
+
+							// Обновляем значения для следующего периода
+							periodStart = stocks[i].RecordedAt
+							currentStock = stocks[i].Amount
 						}
-
-						// Формируем строку для отчета
-						row := make([]interface{}, 8) // 8 колонок
-
-						// Если это первая запись для данного товара, добавляем имя и артикул
-						if firstEntryForProduct {
-							row[0] = prod.Name
-							row[1] = prod.VendorCode
-							row[2] = wh.Name
-							firstEntryForProduct = false
-						} else {
-							row[0] = ""
-							row[1] = ""
-							row[2] = ""
-						}
-
-						row[3] = stocks[i].RecordedAt.Format("02.01.2006 15:04")
-						row[4] = prevStock
-						row[5] = currStock
-						row[6] = stockChange
-						row[7] = changePercent
-
-						rows = append(rows, row)
 					}
 
 					if len(rows) > 0 {
@@ -279,7 +332,7 @@ func addDynamicChangesSheet(
 		}
 	}
 
-	// Сортируем строки по товару и дате для лучшей читаемости
+	// Сортируем строки по товару и периоду для лучшей читаемости
 	sort.Slice(allRows, func(i, j int) bool {
 		// Сначала сортируем по имени товара (первая ячейка)
 		if allRows[i][0] != "" && allRows[j][0] != "" {
@@ -287,14 +340,17 @@ func addDynamicChangesSheet(
 				return allRows[i][0].(string) < allRows[j][0].(string)
 			}
 		}
-		// Если имена одинаковые или пустые, сортируем по дате
+		// Если имена одинаковые или пустые, сортируем по периоду
 		iDate := allRows[i][2].(string)
 		jDate := allRows[j][2].(string)
 		if !isPriceReport {
 			iDate = allRows[i][3].(string)
 			jDate = allRows[j][3].(string)
 		}
-		return iDate < jDate
+		// Извлекаем дату начала периода для сортировки
+		iParts := strings.Split(iDate, " - ")
+		jParts := strings.Split(jDate, " - ")
+		return iParts[0] < jParts[0]
 	})
 
 	// Записываем отсортированные данные в Excel
@@ -305,6 +361,7 @@ func addDynamicChangesSheet(
 		}
 		row++
 	}
+
 	// Если товаров с существенными изменениями не найдено
 	if productsAdded == 0 {
 		emptyRow := 3
