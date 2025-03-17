@@ -25,8 +25,8 @@ services:
       db:
         condition: service_healthy
     environment:
-      - WB_API_KEY=eyJhbGciOiJFUzI1NiIsImtpZCI6IjIwMjUwMjE3djEiLCJ0eXAiOiJKV1QifQ.eyJlbnQiOjEsImV4cCI6MTc1NjQzNDY5NiwiaWQiOiIwMTk1NDdkMS1mMjQwLTdjYWItOWE0MS03NzYyZjk2NTExYzkiLCJpaWQiOjUzNjU3NjI4LCJvaWQiOjEwODA1MTYsInMiOjc5MzQsInNpZCI6IjdhZDQzMTNjLTMzMjItNDkyNi05YTE2LTUxMTc5MmE0MjE1ZSIsInQiOmZhbHNlLCJ1aWQiOjUzNjU3NjI4fQ.Fao2iueUE2bTK0kpaJu6WOE6hFm3L3iEll8MhsYvWLCXD0LKOr44zf8F5x4Daq_RAQcb7ImTNSstIxubws_kug
-      - TELEGRAM_TOKEN=7275211129:AAEn_1RnzqyFQxLD2HFJBWjTY2jVv4kqUUk
+      - WB_API_KEY=
+      - TELEGRAM_TOKEN=
       - TELEGRAM_CHAT_ID=447590340
       - PG_CONN_STRING=postgres://bananzza:bananzza_monitor@db:5432/wbmonitoring?sslmode=disable
       - MONITORING_INTERVAL_MIN=5  # Интервал мониторинга в минутах
