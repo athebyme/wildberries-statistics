@@ -9,4 +9,5 @@ var (
 	ErrTotalLimitReached  = errors.New("total limit reached")
 	ErrContextCanceled    = errors.New("context canceled")
 	ErrFailedAfterRetries = errors.New("failed after retries")
+	ErrNotFound           = errors.New("not found")
 )

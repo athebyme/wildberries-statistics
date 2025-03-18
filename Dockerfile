@@ -7,6 +7,8 @@ COPY go.mod go.sum ./
 
 # Устанавливаем зависимости
 RUN go mod download
+RUN go mod download # Скачать зависимости (без сборки, только загрузка)
+RUN go mod tidy # Очистить и обновить go.sum (опционально, но полезно)
 
 # Копируем исходный код
 COPY . .
