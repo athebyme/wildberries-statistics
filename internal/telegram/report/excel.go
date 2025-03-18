@@ -932,16 +932,17 @@ func (g *ExcelGenerator) addPriceTrendSheet(ctx context.Context, f *excelize.Fil
 					NewPrice:      newPrice,
 					Change:        priceChange,
 					ChangePercent: changePercent,
-					Discount:      prices[i].Discount,
+					Discount:      prices[i].FinalPrice / prices[i].Price * 100,
 				})
+			}
 
-				significantChangeStyle, _ := f.NewStyle(&excelize.Style{
-					Fill: excelize.Fill{Type: "pattern", Color: []string{"#FFEB9C"}, Pattern: 1},
-				})
-				for col := 'A'; col <= 'H'; col++ {
-					cellRef := fmt.Sprintf("%c%d", col, row)
-					f.SetCellStyle(trendSheetName, cellRef, cellRef, significantChangeStyle)
-				}
+			significantChangeStyle, _ := f.NewStyle(&excelize.Style{
+				Fill:   excelize.Fill{Type: "pattern", Color: []string{"#ffeb9c"}, Pattern: 1},
+				Border: []excelize.Border{{Type: "top", Color: "#000000", Style: 1}},
+			})
+			for col := 'A'; col <= 'H'; col++ {
+				cellRef := fmt.Sprintf("%c%d", col, row)
+				f.SetCellStyle(trendSheetName, cellRef, cellRef, significantChangeStyle)
 			}
 		}
 
@@ -953,24 +954,20 @@ func (g *ExcelGenerator) addPriceTrendSheet(ctx context.Context, f *excelize.Fil
 		productsProcessed++
 
 		for _, change := range significantChanges {
-			// Convert prices from kopecks to rubles
 			f.SetCellValue(trendSheetName, fmt.Sprintf("A%d", row), product.Name)
 			f.SetCellValue(trendSheetName, fmt.Sprintf("B%d", row), product.VendorCode)
 
-			// Change details
 			f.SetCellValue(trendSheetName, fmt.Sprintf("C%d", row), change.Time.Format("02.01.2006 15:04:05"))
 			f.SetCellValue(trendSheetName, fmt.Sprintf("D%d", row), change.PreviousPrice)
 			f.SetCellValue(trendSheetName, fmt.Sprintf("E%d", row), change.NewPrice)
 			f.SetCellValue(trendSheetName, fmt.Sprintf("F%d", row), change.Change)
-			f.SetCellValue(trendSheetName, fmt.Sprintf("G%d", row), change.ChangePercent/100) // For percentage format
+			f.SetCellValue(trendSheetName, fmt.Sprintf("G%d", row), change.ChangePercent/100)
 			f.SetCellValue(trendSheetName, fmt.Sprintf("H%d", row), float64(change.Discount)/100)
 
 			row++
 		}
 
-		// Add a blank row between products
 		row++
-
 	}
 
 	// Apply styles to numeric columns
