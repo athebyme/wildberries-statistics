@@ -723,17 +723,17 @@ func (g *ExcelGenerator) GeneratePriceReportExcel(ctx context.Context, startDate
 			}
 
 			// Calculate price metrics
-			firstPrice := prices[0].FinalPrice
-			lastPrice := prices[len(prices)-1].FinalPrice
+			firstPrice := prices[0].Price
+			lastPrice := prices[len(prices)-1].Price
 
 			// Find min and max prices
 			minPrice, maxPrice := firstPrice, firstPrice
 			for _, price := range prices {
-				if price.FinalPrice < minPrice {
-					minPrice = price.FinalPrice
+				if price.Price < minPrice {
+					minPrice = price.Price
 				}
-				if price.FinalPrice > maxPrice {
-					maxPrice = price.FinalPrice
+				if price.Price > maxPrice {
+					maxPrice = price.Price
 				}
 			}
 
@@ -904,8 +904,8 @@ func (g *ExcelGenerator) addPriceTrendSheet(ctx context.Context, f *excelize.Fil
 		}
 
 		for i := 1; i < len(prices); i++ {
-			previousPrice := prices[i-1].FinalPrice
-			newPrice := prices[i].FinalPrice
+			previousPrice := prices[i-1].Price
+			newPrice := prices[i].Price
 
 			if previousPrice == newPrice {
 				continue // No change
@@ -932,7 +932,7 @@ func (g *ExcelGenerator) addPriceTrendSheet(ctx context.Context, f *excelize.Fil
 					NewPrice:      newPrice,
 					Change:        priceChange,
 					ChangePercent: changePercent,
-					Discount:      prices[i].FinalPrice / prices[i].Price * 10,
+					Discount:      prices[i].Price / prices[i].Price * 10,
 				})
 			}
 
