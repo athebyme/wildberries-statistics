@@ -97,13 +97,7 @@ type ProductRecord struct {
 // Структура для ответа API цен и скидок
 type GoodsPricesResponse struct {
 	Data struct {
-		ListGoods []struct {
-			NmID         int        `json:"nmID"`
-			VendorCode   string     `json:"vendorCode"`
-			Sizes        []GoodSize `json:"sizes"`
-			Discount     int        `json:"discount"`
-			ClubDiscount int        `json:"clubDiscount"`
-		} `json:"listGoods"`
+		ListGoods []GoodsPricesResponseListGoods `json:"listGoods"`
 	} `json:"data"`
 }
 

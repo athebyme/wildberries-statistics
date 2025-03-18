@@ -594,7 +594,7 @@ func (m *Service) checkAndSaveStockChanges(ctx context.Context, newStocks []mode
 	productNames := make(map[int]string) // Кеш имен продуктов для уведомлений
 
 	for _, newStock := range newStocks {
-		key := fmt.Sprintf("%d_%d", newStock.ProductID, newStock.WarehouseID)
+		_ = fmt.Sprintf("%d_%d", newStock.ProductID, newStock.WarehouseID)
 
 		// Проверяем, есть ли предыдущие данные
 		var lastStock models.StockRecord
@@ -755,8 +755,19 @@ func (m *Service) processPricesForBatch(ctx context.Context, products []models.P
 		log.Printf("Получено %d товаров с ценами (offset: %d)",
 			len(goodsResp.Data.ListGoods), offset)
 
+		convertedGoods := make([]models.GoodsPricesResponseListGoods, len(goodsResp.Data.ListGoods))
+		for i, good := range goodsResp.Data.ListGoods {
+			convertedGoods[i] = models.GoodsPricesResponseListGoods{
+				NmID:         good.NmID,
+				VendorCode:   good.VendorCode,
+				Sizes:        good.Sizes,
+				Discount:     good.Discount,
+				ClubDiscount: good.ClubDiscount,
+			}
+		}
+
 		// Пакетная обработка полученных цен
-		err = m.processPriceBatch(ctx, goodsResp.Data.ListGoods, nmIDToProduct)
+		err = m.processPriceBatch(ctx, convertedGoods, nmIDToProduct)
 		if err != nil {
 			log.Printf("Error processing price batch: %v", err)
 			return err
@@ -781,6 +792,7 @@ func (m *Service) processPricesForBatch(ctx context.Context, products []models.P
 
 	return nil
 }
+
 func (m *Service) processPriceBatch(
 	ctx context.Context,
 	goods []models.GoodsPricesResponseListGoods,
