@@ -2,15 +2,19 @@ package telegram
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"github.com/jmoiron/sqlx"
 	"gopkg.in/mail.v2"
 	"log"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
+	"wbmonitoring/monitoring/internal/progress"
 	"wbmonitoring/monitoring/internal/telegram/report"
 )
 
@@ -23,9 +27,10 @@ type Bot struct {
 	userStates       map[int64]string
 	reportMessageIDs map[int64][]int
 
-	emailService   *EmailService
-	pdfGenerator   *report.PDFGenerator
-	excelGenerator *report.ExcelGenerator
+	emailService    *EmailService
+	pdfGenerator    *report.PDFGenerator
+	excelGenerator  *report.ExcelGenerator
+	progressTracker *progress.Tracker
 }
 
 func NewBot(token string, chatID int64, db *sqlx.DB, allowedUserIDs []int64, config report.ReportConfig) (*Bot, error) {
@@ -51,11 +56,15 @@ func NewBot(token string, chatID int64, db *sqlx.DB, allowedUserIDs []int64, con
 		emailService:   nil,
 		pdfGenerator:   nil,
 		excelGenerator: nil,
+
+		progressTracker: progress.NewProgressTracker(100),
 	}
 
 	if err := bot.Initialize(); err != nil {
 		return nil, err
 	}
+
+	go bot.runProgressCleanup()
 
 	return bot, nil
 }
@@ -106,6 +115,200 @@ func (b *Bot) SendTelegramAlertWithParseMode(message, parseMode string) error {
 	msg.ParseMode = parseMode
 	_, err := b.api.Send(msg)
 	return err
+}
+
+// Функция для запуска периодической очистки завершенных операций
+func (b *Bot) runProgressCleanup() {
+	ticker := time.NewTicker(1 * time.Hour)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		// Удаляем завершенные операции старше 24 часов
+		b.progressTracker.CleanupCompletedOperations(24 * time.Hour)
+	}
+}
+
+// Генерация уникального ID для операции
+func generateOperationID() string {
+	bytes := make([]byte, 8)
+	if _, err := rand.Read(bytes); err != nil {
+		// В случае ошибки используем timestamp
+		return fmt.Sprintf("op-%d", time.Now().UnixNano())
+	}
+
+	return hex.EncodeToString(bytes)
+}
+
+// Добавляем метод для проверки статуса операции
+func (b *Bot) handleStatusCommand(message *tgbotapi.Message) {
+	args := strings.Fields(message.Text)
+
+	// Если передан ID операции, показываем конкретную операцию
+	if len(args) > 1 {
+		operationID := args[1]
+		b.sendOperationStatus(message.Chat.ID, operationID)
+		return
+	}
+
+	// Иначе показываем список активных операций
+	b.sendActiveOperationsList(message.Chat.ID)
+}
+
+// Отправляем статус конкретной операции
+func (b *Bot) sendOperationStatus(chatID int64, operationID string) {
+	op := b.progressTracker.GetOperation(operationID)
+	if op == nil {
+		b.api.Send(tgbotapi.NewMessage(chatID, fmt.Sprintf("Операция с ID '%s' не найдена.", operationID)))
+		return
+	}
+
+	// Формируем сообщение с информацией о прогрессе
+	var status string
+	if op.IsComplete {
+		if op.Error != "" {
+			status = "завершена с ошибкой"
+		} else {
+			status = "завершена"
+		}
+	} else {
+		status = "в процессе"
+	}
+
+	// Вычисляем процент выполнения
+	percentComplete := 0
+	if op.TotalItems > 0 {
+		percentComplete = int((float64(op.ProcessedItems) / float64(op.TotalItems)) * 100)
+	}
+
+	// Создаем сообщение
+	msgText := fmt.Sprintf("📊 *Статус операции*: `%s`\n\n", op.ID)
+	msgText += fmt.Sprintf("*Название*: %s\n", op.Name)
+	msgText += fmt.Sprintf("*Статус*: %s\n", status)
+	msgText += fmt.Sprintf("*Начало*: %s\n", op.StartTime.Format("02.01.2006 15:04:05"))
+	msgText += fmt.Sprintf("*Прогресс*: %d%% (%d из %d)\n", percentComplete, op.ProcessedItems, op.TotalItems)
+
+	if op.CompletedItems > 0 || op.FailedItems > 0 {
+		msgText += fmt.Sprintf("*Успешно*: %d\n", op.CompletedItems)
+		msgText += fmt.Sprintf("*С ошибками*: %d\n", op.FailedItems)
+	}
+
+	if !op.IsComplete && op.EstimatedEndTime.After(time.Now()) {
+		msgText += fmt.Sprintf("*Ожидаемое время завершения*: %s\n", op.EstimatedEndTime.Format("15:04:05"))
+	}
+
+	if op.Error != "" {
+		msgText += fmt.Sprintf("\n⚠️ *Ошибка*: %s\n", op.Error)
+	}
+
+	// Добавляем последние сообщения (не более 5)
+	if len(op.Messages) > 0 {
+		msgText += "\n*Последние сообщения*:\n"
+
+		start := 0
+		if len(op.Messages) > 5 {
+			start = len(op.Messages) - 5
+		}
+
+		for i := start; i < len(op.Messages); i++ {
+			msg := op.Messages[i]
+
+			// Выбираем эмодзи для уровня сообщения
+			var emoji string
+			switch msg.Level {
+			case "error":
+				emoji = "❌"
+			case "warning":
+				emoji = "⚠️"
+			default:
+				emoji = "ℹ️"
+			}
+
+			// Добавляем сообщение с временем
+			msgText += fmt.Sprintf("%s `%s`: %s\n",
+				emoji,
+				msg.Time.Format("15:04:05"),
+				msg.Message)
+		}
+	}
+
+	// Отправляем сообщение
+	message := tgbotapi.NewMessage(chatID, msgText)
+	message.ParseMode = "Markdown"
+
+	b.api.Send(message)
+}
+
+// Отправляем список активных операций
+func (b *Bot) sendActiveOperationsList(chatID int64) {
+	operations := b.progressTracker.GetAllOperations()
+
+	if len(operations) == 0 {
+		b.api.Send(tgbotapi.NewMessage(chatID, "Нет активных операций."))
+		return
+	}
+
+	// Создаем список операций с клавиатурой для выбора
+	var activeOps, completedOps []*progress.OperationProgress
+
+	for _, op := range operations {
+		if op.IsComplete {
+			completedOps = append(completedOps, op)
+		} else {
+			activeOps = append(activeOps, op)
+		}
+	}
+
+	msgText := "*Операции*:\n\n"
+
+	// Сначала выводим активные операции
+	if len(activeOps) > 0 {
+		msgText += "*Активные операции*:\n"
+		for _, op := range activeOps {
+			percentComplete := 0
+			if op.TotalItems > 0 {
+				percentComplete = int((float64(op.ProcessedItems) / float64(op.TotalItems)) * 100)
+			}
+
+			msgText += fmt.Sprintf("• `%s` - %s: %d%% (%d из %d)\n",
+				op.ID, op.Name, percentComplete, op.ProcessedItems, op.TotalItems)
+		}
+		msgText += "\n"
+	}
+
+	// Затем выводим последние завершенные операции (не более 5)
+	if len(completedOps) > 0 {
+		msgText += "*Завершенные операции*:\n"
+
+		// Сортируем по времени завершения (от новых к старым)
+		sort.Slice(completedOps, func(i, j int) bool {
+			return completedOps[i].LastUpdateTime.After(completedOps[j].LastUpdateTime)
+		})
+
+		// Показываем только последние 5
+		showCount := len(completedOps)
+		if showCount > 5 {
+			showCount = 5
+		}
+
+		for i := 0; i < showCount; i++ {
+			op := completedOps[i]
+
+			status := "✅ успешно"
+			if op.Error != "" {
+				status = "❌ с ошибкой"
+			}
+
+			msgText += fmt.Sprintf("• `%s` - %s: %s\n",
+				op.ID, op.Name, status)
+		}
+	}
+
+	msgText += "\nДля просмотра статуса операции отправьте команду `/status ID_операции`"
+
+	message := tgbotapi.NewMessage(chatID, msgText)
+	message.ParseMode = "Markdown"
+
+	b.api.Send(message)
 }
 
 func (b *Bot) sendWelcomeMessage(chatID int64) {
@@ -582,12 +785,43 @@ func (b *Bot) requestEmailInput(chatID int64, reportType string, period string) 
 
 // Обновленный метод для отправки отчета на email
 func (b *Bot) sendReportToEmail(chatID int64, userID int64, reportType, period, email string) {
+	// Генерируем ID операции
+	operationID := generateOperationID()
+
+	// Определяем название отчета
+	var reportName string
+	if reportType == "prices" {
+		reportName = "отчета по ценам"
+	} else {
+		reportName = "отчета по остаткам"
+	}
+
+	periodName := b.getPeriodName(period)
+
+	// Создаем операцию в трекере прогресса
+	totalSteps := 100
+	b.progressTracker.StartOperation(operationID, fmt.Sprintf("Отправка %s за %s на email", reportName, periodName), totalSteps)
+
 	// Отправляем сообщение о начале генерации отчета
-	msg := tgbotapi.NewMessage(chatID, "Генерирую отчет...")
+	msgText := fmt.Sprintf(
+		"🔄 Начата генерация %s за %s для отправки на email.\n\n"+
+			"ID операции: `%s`\n\n"+
+			"Вы можете отслеживать прогресс с помощью команды:\n"+
+			"`/status %s`",
+		reportName, periodName, operationID, operationID)
+
+	msg := tgbotapi.NewMessage(chatID, msgText)
+	msg.ParseMode = "Markdown"
 	sentMsg, err := b.api.Send(msg)
 	if err == nil {
 		b.trackReportMessage(chatID, sentMsg.MessageID)
 	}
+
+	// Запускаем горутину для периодического обновления сообщения
+	go b.updateReportProgress(chatID, sentMsg.MessageID, operationID)
+
+	// Обновляем прогресс: начинаем обработку
+	b.progressTracker.UpdateProgress(operationID, 5, 0, 0, "Определение параметров отчета")
 
 	// Форматируем период для отображения пользователю
 	displayPeriod := period
@@ -611,34 +845,48 @@ func (b *Bot) sendReportToEmail(chatID int64, userID int64, reportType, period, 
 		}
 	}
 
+	b.progressTracker.UpdateProgress(operationID, 10, 0, 0, "Начало генерации файла отчета")
+
 	// Генерируем отчет и получаем путь к файлу
-	filePath, reportName, err := b.generateReportFile(reportType, period, "excel")
+	filePath, reportFileName, err := b.generateReportFile(reportType, period, "excel", operationID)
 	if err != nil {
-		log.Printf("Ошибка при генерации отчета: %v", err)
+		errorMsg := fmt.Sprintf("Ошибка при генерации отчета: %v", err)
+		log.Printf(errorMsg)
+		b.progressTracker.CompleteOperation(operationID, errorMsg)
 		b.api.Send(tgbotapi.NewEditMessageText(
 			chatID, sentMsg.MessageID,
-			fmt.Sprintf("Ошибка при генерации отчета: %v", err),
+			fmt.Sprintf("❌ %s", errorMsg),
 		))
 		return
 	}
+
+	b.progressTracker.UpdateProgress(operationID, 70, 0, 0, "Файл отчета создан, подготовка к отправке на email")
 
 	// Отправляем email, используя EmailService, если он доступен
 	var sendErr error
+	b.progressTracker.UpdateProgress(operationID, 80, 0, 0,
+		fmt.Sprintf("Отправка отчета на email: %s", email))
+
 	if b.emailService != nil {
-		sendErr = b.emailService.SendReportEmail(email, reportType, displayPeriod, filePath, reportName)
+		sendErr = b.emailService.SendReportEmail(email, reportType, displayPeriod, filePath, reportFileName)
 	} else {
 		// Обратная совместимость - используем старый метод
-		sendErr = b.sendEmailLegacy(email, reportType, displayPeriod, filePath, reportName)
+		b.progressTracker.AddWarning(operationID, "Email сервис не инициализирован, используем legacy метод")
+		sendErr = b.sendEmailLegacy(email, reportType, displayPeriod, filePath, reportFileName)
 	}
 
 	if sendErr != nil {
-		log.Printf("Ошибка при отправке email: %v", sendErr)
+		errorMsg := fmt.Sprintf("Ошибка при отправке email: %v", sendErr)
+		log.Printf(errorMsg)
+		b.progressTracker.CompleteOperation(operationID, errorMsg)
 		b.api.Send(tgbotapi.NewEditMessageText(
 			chatID, sentMsg.MessageID,
-			fmt.Sprintf("Ошибка при отправке отчета: %v", sendErr),
+			fmt.Sprintf("❌ %s", errorMsg),
 		))
 		return
 	}
+
+	b.progressTracker.UpdateProgress(operationID, 90, 0, 0, "Email успешно отправлен, завершение операции")
 
 	b.cleanupReportMessages(chatID)
 
@@ -674,6 +922,9 @@ func (b *Bot) sendReportToEmail(chatID int64, userID int64, reportType, period, 
 		)
 		b.api.Send(successMsg)
 	}
+
+	// Отмечаем операцию как успешно завершенную
+	b.progressTracker.CompleteOperation(operationID, "")
 
 	// Удаляем временный файл
 	defer os.Remove(filePath)
@@ -773,67 +1024,83 @@ func (b *Bot) sendEmailLegacy(to string, reportType string, period string, fileP
 }
 
 // возвращая путь к файлу, имя отчёта и ошибку, если она произошла.
-func (b *Bot) generateReportFile(reportType, period, format string) (string, string, error) {
-	var startDate, endDate time.Time
-	now := time.Now()
-
-	// Расчёт начала и конца периода
-	if strings.HasPrefix(period, "custom_") {
-		parts := strings.Split(period, "_")
-		if len(parts) != 3 {
-			return "", "", fmt.Errorf("неверный формат кастомного периода: %s", period)
-		}
-
-		startDateStr, endDateStr := parts[1], parts[2]
-
-		// Парсим даты из кастомного периода
-		var err error
-		startDate, err = time.ParseInLocation("02.01.2006", startDateStr, now.Location())
-		if err != nil {
-			return "", "", fmt.Errorf("ошибка парсинга начальной даты: %v", err)
-		}
-
-		endDate, err = time.ParseInLocation("02.01.2006", endDateStr, now.Location())
-		if err != nil {
-			return "", "", fmt.Errorf("ошибка парсинга конечной даты: %v", err)
-		}
-
-		// Устанавливаем конец дня для конечной даты
-		endDate = time.Date(endDate.Year(), endDate.Month(), endDate.Day(), 23, 59, 59, 999999999, endDate.Location())
-	} else {
-		switch period {
-		case "day":
-			startDate = time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
-			endDate = now
-		case "week":
-			startDate = now.AddDate(0, 0, -7)
-			endDate = now
-		case "month":
-			startDate = now.AddDate(0, -1, 0)
-			endDate = now
-		default:
-			return "", "", fmt.Errorf("неизвестный период: %s", period)
-		}
+func (b *Bot) generateReportFile(reportType, period, format string, operationID string) (string, string, error) {
+	// Расчет дат
+	startDate, endDate, err := b.calculateReportDates(period)
+	if err != nil {
+		return "", "", fmt.Errorf("error calculating dates: %w", err)
 	}
 
-	// Генерация отчёта в зависимости от типа и формата
-	ctx := context.Background()
+	b.progressTracker.UpdateProgress(operationID, 20, 0, 0,
+		"Подготовка генерации отчета")
 
+	// Вызов соответствующего метода генерации в зависимости от типа отчета
 	if reportType == "prices" {
 		if format == "excel" {
-			return b.excelGenerator.GeneratePriceReportExcel(ctx, startDate, endDate)
+			return b.generatePriceExcelWithProgress(startDate, endDate, operationID)
 		} else if format == "pdf" {
-			return b.pdfGenerator.GeneratePriceReportPDF(ctx, startDate, endDate, b.config.MinPriceChangePercent)
+			return b.generatePricePDFWithProgress(startDate, endDate, operationID)
 		}
 	} else if reportType == "stocks" {
 		if format == "excel" {
-			return b.excelGenerator.GenerateStockReportExcel(ctx, startDate, endDate)
+			return b.generateStockExcelWithProgress(startDate, endDate, operationID)
 		} else if format == "pdf" {
-			return b.pdfGenerator.GenerateStockReportPDF(ctx, startDate, endDate, b.config.MinStockChangePercent)
+			return b.generateStockPDFWithProgress(startDate, endDate, operationID)
 		}
 	}
 
-	return "", "", fmt.Errorf("неизвестный тип отчёта или формат")
+	return "", "", fmt.Errorf("неподдерживаемый тип отчета или формат")
+}
+
+// Генерация Excel-отчета по ценам с отслеживанием прогресса
+func (b *Bot) generatePriceExcelWithProgress(startDate, endDate time.Time, operationID string) (string, string, error) {
+	b.progressTracker.UpdateProgress(operationID, 25, 0, 0, "Получение данных о товарах")
+
+	// Проверяем существование генератора
+	if b.excelGenerator == nil {
+		return "", "", fmt.Errorf("Excel генератор не инициализирован")
+	}
+
+	// Вызываем обычный метод генерации, который у нас уже есть
+	return b.excelGenerator.GeneratePriceReportExcel(context.Background(), startDate, endDate)
+}
+
+// Генерация PDF-отчета по ценам с отслеживанием прогресса
+func (b *Bot) generatePricePDFWithProgress(startDate, endDate time.Time, operationID string) (string, string, error) {
+	b.progressTracker.UpdateProgress(operationID, 25, 0, 0, "Получение данных о товарах")
+
+	// Проверяем существование генератора
+	if b.pdfGenerator == nil {
+		return "", "", fmt.Errorf("PDF генератор не инициализирован")
+	}
+
+	// Вызываем обычный метод генерации, который у нас уже есть
+	return b.pdfGenerator.GeneratePriceReportPDF(context.Background(), startDate, endDate, b.config.MinPriceChangePercent)
+}
+
+// Аналогично для отчетов по остаткам
+func (b *Bot) generateStockExcelWithProgress(startDate, endDate time.Time, operationID string) (string, string, error) {
+	b.progressTracker.UpdateProgress(operationID, 25, 0, 0, "Получение данных о товарах и складах")
+
+	// Проверяем существование генератора
+	if b.excelGenerator == nil {
+		return "", "", fmt.Errorf("Excel генератор не инициализирован")
+	}
+
+	// Вызываем обычный метод генерации, который у нас уже есть
+	return b.excelGenerator.GenerateStockReportExcel(context.Background(), startDate, endDate)
+}
+
+func (b *Bot) generateStockPDFWithProgress(startDate, endDate time.Time, operationID string) (string, string, error) {
+	b.progressTracker.UpdateProgress(operationID, 25, 0, 0, "Получение данных о товарах и складах")
+
+	// Проверяем существование генератора
+	if b.pdfGenerator == nil {
+		return "", "", fmt.Errorf("PDF генератор не инициализирован")
+	}
+
+	// Вызываем обычный метод генерации, который у нас уже есть
+	return b.pdfGenerator.GenerateStockReportPDF(context.Background(), startDate, endDate, b.config.MinStockChangePercent)
 }
 
 // Обновленный метод handleMessage
@@ -843,6 +1110,11 @@ func (b *Bot) handleMessage(message *tgbotapi.Message) {
 	if strings.HasPrefix(state, "waiting_custom_period_") ||
 		strings.HasPrefix(state, "waiting_email_") {
 		b.trackReportMessage(message.Chat.ID, message.MessageID)
+	}
+
+	if strings.HasPrefix(message.Text, "/status") {
+		b.handleStatusCommand(message)
+		return
 	}
 
 	if strings.HasPrefix(state, "waiting_custom_period_") {

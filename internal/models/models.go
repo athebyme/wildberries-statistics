@@ -271,3 +271,34 @@ type StockSnapshot struct {
 	Amount       int       `db:"amount"`
 	SnapshotTime time.Time `db:"snapshot_time"`
 }
+
+type GoodsPricesResponseListGoods struct {
+	NmID         int        `json:"nmID"`
+	VendorCode   string     `json:"vendorCode"`
+	Sizes        []GoodSize `json:"sizes"`
+	Discount     int        `json:"discount"`
+	ClubDiscount int        `json:"clubDiscount"`
+}
+
+type ProductSummary struct {
+	Product           ProductRecord
+	TotalInitialStock int
+	TotalFinalStock   int
+	TotalChange       int
+	ChangePercent     float64
+	RecordsCount      int
+	HasSignificantChg bool
+}
+
+type WarehouseDetail struct {
+	Product           ProductRecord
+	Warehouse         Warehouse
+	InitialStock      int
+	FinalStock        int
+	Change            int
+	ChangePercent     float64
+	MinStock          int
+	MaxStock          int
+	RecordsCount      int
+	HasSignificantChg bool
+}

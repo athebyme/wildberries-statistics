@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 	"wbmonitoring/monitoring/internal/db"
 )
@@ -32,47 +33,252 @@ func (b *Bot) sendReportMenu(chatID int64) {
 }
 
 func (b *Bot) generateReport(chatID int64, reportType, period, format string) {
+	// Генерируем ID операции и создаем сообщение о начале генерации
+	operationID := generateOperationID()
 
-	progressMsg := tgbotapi.NewMessage(chatID, "Генерация отчета... Пожалуйста, подождите.")
+	var reportName string
+	if reportType == "prices" {
+		reportName = "отчета по ценам"
+	} else {
+		reportName = "отчета по остаткам"
+	}
+
+	periodName := b.getPeriodName(period)
+
+	// Создаем операцию в трекере прогресса
+	// Устанавливаем общее количество шагов (примерно) для отслеживания прогресса
+	totalSteps := 100
+	_ = b.progressTracker.StartOperation(operationID, fmt.Sprintf("Генерация %s за %s", reportName, periodName), totalSteps)
+
+	// Отправляем сообщение о начале генерации с информацией о возможности отслеживания прогресса
+	progressMsg := tgbotapi.NewMessage(chatID, fmt.Sprintf(
+		"🔄 Начата генерация %s за %s в формате %s.\n\n"+
+			"ID операции: `%s`\n\n"+
+			"Вы можете отслеживать прогресс с помощью команды:\n"+
+			"`/status %s`",
+		reportName, periodName, strings.ToUpper(format), operationID, operationID))
+	progressMsg.ParseMode = "Markdown"
 	sentMsg, err := b.api.Send(progressMsg)
 	if err == nil {
 		b.trackReportMessage(chatID, sentMsg.MessageID)
 	}
 
-	filePath, reportName, err := b.generateReportFile(reportType, period, format)
+	// Запускаем горутину для периодического обновления сообщения
+	go b.updateReportProgress(chatID, sentMsg.MessageID, operationID)
+
+	// Обновляем прогресс: начинаем обработку
+	b.progressTracker.UpdateProgress(operationID, 5, 0, 0, "Определение параметров отчета")
+
+	// Определяем и рассчитываем даты для отчета
+	startDate, endDate, err := b.calculateReportDates(period)
 	if err != nil {
-		log.Printf("Ошибка при генерации отчета: %v", err)
-		errorMsg := tgbotapi.NewMessage(chatID, fmt.Sprintf("Ошибка при генерации отчета: %v", err))
-		b.api.Send(errorMsg)
+		errorMsg := fmt.Sprintf("Ошибка при определении дат для отчета: %v", err)
+		b.progressTracker.CompleteOperation(operationID, errorMsg)
+		b.api.Send(tgbotapi.NewMessage(chatID, "❌ "+errorMsg))
 		return
 	}
 
-	fileBytes, err := os.ReadFile(filePath)
-	if err != nil {
-		log.Printf("Ошибка при чтении файла отчета: %v", err)
-		errorMsg := tgbotapi.NewMessage(chatID, "Ошибка при подготовке отчета к отправке")
-		b.api.Send(errorMsg)
-		return
+	b.progressTracker.UpdateProgress(operationID, 10, 0, 0,
+		fmt.Sprintf("Период отчета: с %s по %s", startDate.Format("02.01.2006"), endDate.Format("02.01.2006")))
+
+	// Запускаем генерацию отчета в отдельной горутине
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				errorMsg := fmt.Sprintf("Паника при генерации отчета: %v", r)
+				b.progressTracker.CompleteOperation(operationID, errorMsg)
+				b.api.Send(tgbotapi.NewMessage(chatID, "❌ "+errorMsg))
+			}
+		}()
+
+		b.progressTracker.UpdateProgress(operationID, 15, 0, 0, "Начало генерации файла отчета")
+
+		// Генерация файла отчета
+		filePath, fileName, err := b.generateReportFile(reportType, period, format, operationID)
+		if err != nil {
+			errorMsg := fmt.Sprintf("Ошибка при генерации отчета: %v", err)
+			b.progressTracker.CompleteOperation(operationID, errorMsg)
+			b.api.Send(tgbotapi.NewMessage(chatID, "❌ "+errorMsg))
+			return
+		}
+
+		b.progressTracker.UpdateProgress(operationID, 90, 0, 0, "Файл отчета создан, подготовка к отправке")
+
+		// Чтение файла для отправки
+		fileBytes, err := os.ReadFile(filePath)
+		if err != nil {
+			errorMsg := fmt.Sprintf("Ошибка при чтении файла отчета: %v", err)
+			b.progressTracker.CompleteOperation(operationID, errorMsg)
+			b.api.Send(tgbotapi.NewMessage(chatID, "❌ "+errorMsg))
+			return
+		}
+
+		b.progressTracker.UpdateProgress(operationID, 95, 0, 0, "Отправка файла")
+
+		// Очищаем предыдущие сообщения о прогрессе
+		b.cleanupReportMessages(chatID)
+
+		var reportTypeName string
+		if reportType == "prices" {
+			reportTypeName = "ценам"
+		} else {
+			reportTypeName = "остаткам"
+		}
+
+		// Отправляем финальный отчет
+		doc := tgbotapi.NewDocument(chatID, tgbotapi.FileBytes{
+			Name:  fileName,
+			Bytes: fileBytes,
+		})
+		doc.Caption = fmt.Sprintf("📊 Отчет по %s за %s", reportTypeName, b.getPeriodName(period))
+
+		_, err = b.api.Send(doc)
+		if err != nil {
+			errorMsg := fmt.Sprintf("Ошибка при отправке файла: %v", err)
+			b.progressTracker.CompleteOperation(operationID, errorMsg)
+			b.api.Send(tgbotapi.NewMessage(chatID, "❌ "+errorMsg))
+			return
+		}
+
+		// Удаление временного файла
+		os.Remove(filePath)
+
+		// Завершение операции
+		b.progressTracker.CompleteOperation(operationID, "")
+
+		// Отправляем сообщение об успешном завершении
+		b.api.Send(tgbotapi.NewMessage(chatID,
+			fmt.Sprintf("✅ Отчет успешно сгенерирован и отправлен! ID операции: `%s`", operationID)))
+	}()
+}
+
+// Функция для обновления сообщения о прогрессе
+func (b *Bot) updateReportProgress(chatID int64, messageID int, operationID string) {
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+
+	// Ограничиваем время обновления сообщений
+	timeout := time.After(30 * time.Minute)
+
+	for {
+		select {
+		case <-ticker.C:
+			// Получаем текущий прогресс
+			op := b.progressTracker.GetOperation(operationID)
+			if op == nil {
+				return // Операция не найдена
+			}
+
+			// Если операция завершена, останавливаем обновления
+			if op.IsComplete {
+				return
+			}
+
+			// Формируем сообщение о прогрессе
+			percentComplete := 0
+			if op.TotalItems > 0 {
+				percentComplete = int((float64(op.ProcessedItems) / float64(op.TotalItems)) * 100)
+			}
+
+			// Создаем индикатор прогресса
+			progressBar := ""
+			barLength := 10
+			filledChars := int(float64(barLength) * float64(percentComplete) / 100.0)
+
+			for i := 0; i < barLength; i++ {
+				if i < filledChars {
+					progressBar += "▓"
+				} else {
+					progressBar += "░"
+				}
+			}
+
+			msgText := fmt.Sprintf(
+				"🔄 Генерация отчета (ID: `%s`)\n\n"+
+					"*Прогресс*: %d%% %s\n\n"+
+					"*Последние операции*:\n",
+				op.ID, percentComplete, progressBar)
+
+			// Добавляем последние 3 сообщения
+			messagesCount := len(op.Messages)
+			start := messagesCount - 3
+			if start < 0 {
+				start = 0
+			}
+
+			for i := start; i < messagesCount; i++ {
+				msg := op.Messages[i]
+				msgText += fmt.Sprintf("• %s\n", msg.Message)
+			}
+
+			// Добавляем информацию о времени выполнения
+			elapsedTime := time.Since(op.StartTime).Round(time.Second)
+			msgText += fmt.Sprintf("\n*Время выполнения*: %s", elapsedTime)
+
+			// Если есть оценка времени завершения, добавляем ее
+			if op.EstimatedEndTime.After(time.Now()) {
+				remainingTime := op.EstimatedEndTime.Sub(time.Now()).Round(time.Second)
+				msgText += fmt.Sprintf("\n*Осталось примерно*: %s", remainingTime)
+			}
+
+			// Обновляем сообщение
+			editMsg := tgbotapi.NewEditMessageText(chatID, messageID, msgText)
+			editMsg.ParseMode = "Markdown"
+			_, err := b.api.Send(editMsg)
+			if err != nil {
+				// Если не удалось обновить сообщение, логируем ошибку и продолжаем
+				log.Printf("Ошибка при обновлении сообщения о прогрессе: %v", err)
+			}
+
+		case <-timeout:
+			// По истечении таймаута прекращаем обновления
+			return
+		}
 	}
+}
 
-	b.cleanupReportMessages(chatID)
+// Расчет дат для отчета на основе периода
+func (b *Bot) calculateReportDates(period string) (startDate, endDate time.Time, err error) {
+	now := time.Now()
 
-	var reportTypeName string
-	if reportType == "prices" {
-		reportTypeName = "ценам"
+	// Обработка произвольного периода
+	if strings.HasPrefix(period, "custom_") {
+		parts := strings.Split(period, "_")
+		if len(parts) != 3 {
+			return time.Time{}, time.Time{}, fmt.Errorf("некорректный формат произвольного периода")
+		}
+
+		startDateStr, endDateStr := parts[1], parts[2]
+		startDate, err = time.ParseInLocation("02.01.2006", startDateStr, now.Location())
+		if err != nil {
+			return time.Time{}, time.Time{}, fmt.Errorf("ошибка разбора начальной даты: %w", err)
+		}
+
+		endDate, err = time.ParseInLocation("02.01.2006", endDateStr, now.Location())
+		if err != nil {
+			return time.Time{}, time.Time{}, fmt.Errorf("ошибка разбора конечной даты: %w", err)
+		}
+
+		// Устанавливаем конец дня для конечной даты
+		endDate = time.Date(endDate.Year(), endDate.Month(), endDate.Day(), 23, 59, 59, 999999999, endDate.Location())
 	} else {
-		reportTypeName = "остаткам"
+		// Стандартные периоды
+		switch period {
+		case "day":
+			startDate = time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+			endDate = now
+		case "week":
+			startDate = now.AddDate(0, 0, -7)
+			endDate = now
+		case "month":
+			startDate = now.AddDate(0, -1, 0)
+			endDate = now
+		default:
+			return time.Time{}, time.Time{}, fmt.Errorf("неизвестный период: %s", period)
+		}
 	}
 
-	doc := tgbotapi.NewDocument(chatID, tgbotapi.FileBytes{
-		Name:  reportName,
-		Bytes: fileBytes,
-	})
-	doc.Caption = fmt.Sprintf("Отчет по %s за %s", reportTypeName, b.getPeriodName(period))
-
-	b.api.Send(doc)
-
-	os.Remove(filePath)
+	return startDate, endDate, nil
 }
 
 // Метод для генерации и отправки ежедневного отчета по ценам через ExcelGenerator

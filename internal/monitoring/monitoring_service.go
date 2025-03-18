@@ -12,6 +12,7 @@ import (
 	"math"
 	"net/http"
 	"os"
+	"sync"
 	"time"
 	"wbmonitoring/monitoring/internal/api"
 	"wbmonitoring/monitoring/internal/config"
@@ -306,24 +307,685 @@ func (m *Service) SendGreetings(ctx context.Context) error {
 func (m *Service) ProcessMonitoring(ctx context.Context) error {
 	log.Println("Starting monitoring cycle")
 
-	// Получаем список всех продуктов (без использования last_checked)
-	products, err := m.GetAllProducts(ctx)
+	// Добавим таймаут для операции мониторинга, чтобы избежать зависаний
+	ctxWithTimeout, cancel := context.WithTimeout(ctx, 30*time.Minute)
+	defer cancel()
+
+	// Получаем список всех продуктов
+	products, err := m.GetAllProducts(ctxWithTimeout)
 	if err != nil {
 		return fmt.Errorf("failed to get products: %w", err)
 	}
 
-	// Обработка складских остатков
-	if err := m.processStocks(ctx, products); err != nil {
-		log.Printf("Error processing stocks: %v", err)
-		// Продолжаем выполнение, чтобы обработать цены
+	log.Printf("Найдено %d товаров для обработки", len(products))
+
+	// Ограничение на размер пакета продуктов
+	// Разбиваем обработку на группы для избежания проблем с памятью
+	const maxBatchSize = 500
+	var batches [][]models.ProductRecord
+
+	for i := 0; i < len(products); i += maxBatchSize {
+		end := i + maxBatchSize
+		if end > len(products) {
+			end = len(products)
+		}
+		batches = append(batches, products[i:end])
 	}
 
-	// Обработка цен через API цен и скидок
-	if err := m.processPrices(ctx, products); err != nil {
-		log.Printf("Error processing prices: %v", err)
+	log.Printf("Товары разделены на %d групп для обработки", len(batches))
+
+	// Обрабатываем группы последовательно для избежания перегрузки API и базы данных
+	for i, batch := range batches {
+		log.Printf("Обработка группы %d из %d (%d товаров)", i+1, len(batches), len(batch))
+
+		// Установим таймаут для каждой группы
+		batchCtx, batchCancel := context.WithTimeout(ctxWithTimeout, 5*time.Minute)
+
+		// Обработка складских остатков для группы
+		if err := m.processStocksForBatch(batchCtx, batch); err != nil {
+			log.Printf("Error processing stocks for batch %d: %v", i+1, err)
+		}
+
+		// Обработка цен для группы
+		if err := m.processPricesForBatch(batchCtx, batch); err != nil {
+			log.Printf("Error processing prices for batch %d: %v", i+1, err)
+		}
+
+		batchCancel()
+
+		// Небольшая пауза между группами для снижения нагрузки
+		time.Sleep(2 * time.Second)
 	}
 
 	log.Println("Monitoring cycle completed")
+	return nil
+}
+
+func (m *Service) processStocksForBatch(ctx context.Context, products []models.ProductRecord) error {
+	// Получаем список складов
+	warehouses, err := m.GetWarehouses(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to get warehouses: %w", err)
+	}
+
+	// Получаем все ID продуктов для пакетного запроса
+	productIDs := make([]int, len(products))
+	for i, p := range products {
+		productIDs[i] = p.ID
+	}
+
+	// Создаем карту продуктов для быстрого доступа
+	productMap := make(map[string]*models.ProductRecord)
+	for i := range products {
+		product := &products[i]
+		productMap[product.Barcode] = product
+	}
+
+	// Группируем обработку складов для параллельного выполнения
+	var wg sync.WaitGroup
+	errChan := make(chan error, len(warehouses))
+
+	// Создаем буфер для работы с ограниченным числом складов одновременно
+	semaphore := make(chan struct{}, m.config.WorkerCount)
+
+	for _, warehouse := range warehouses {
+		wg.Add(1)
+
+		go func(wh models.Warehouse) {
+			defer wg.Done()
+
+			// Захватываем слот в семафоре
+			semaphore <- struct{}{}
+			defer func() { <-semaphore }()
+
+			// Проверяем, не был ли контекст отменен
+			select {
+			case <-ctx.Done():
+				errChan <- ctx.Err()
+				return
+			default:
+				// Продолжаем выполнение
+			}
+
+			if err := m.processWarehouseStocksOptimized(ctx, wh, products, productMap); err != nil {
+				log.Printf("Error processing warehouse %d: %v", wh.ID, err)
+				errChan <- err
+			}
+		}(warehouse)
+	}
+
+	// Ожидаем завершения всех горутин
+	wg.Wait()
+	close(errChan)
+
+	// Проверяем, были ли ошибки
+	var errs []error
+	for err := range errChan {
+		errs = append(errs, err)
+	}
+
+	if len(errs) > 0 {
+		return fmt.Errorf("errors occurred during stock processing: %v", errs)
+	}
+
+	return nil
+}
+
+func (m *Service) processWarehouseStocksOptimized(
+	ctx context.Context,
+	warehouse models.Warehouse,
+	products []models.ProductRecord,
+	productMap map[string]*models.ProductRecord,
+) error {
+	// Разбиваем продукты на партии по 1000 товаров (ограничение API)
+	batchSize := 1000
+
+	for i := 0; i < len(products); i += batchSize {
+		end := i + batchSize
+		if end > len(products) {
+			end = len(products)
+		}
+
+		batch := products[i:end]
+
+		// Отслеживаем время выполнения запроса
+		batchStartTime := time.Now()
+
+		// Собираем баркоды для текущей партии
+		var barcodes []string
+		for j := range batch {
+			product := &batch[j]
+			barcodes = append(barcodes, product.Barcode)
+		}
+
+		// Запрашиваем остатки с повторными попытками при ошибках
+		var stockResp *models.StockResponse
+		var err error
+
+		for attempt := 1; attempt <= m.config.MaxRetries; attempt++ {
+			// Запрашиваем остатки
+			stockResp, err = m.GetStocks(ctx, warehouse.ID, barcodes)
+			if err == nil {
+				break
+			}
+
+			log.Printf("Attempt %d: Error getting stocks for warehouse %d: %v",
+				attempt, warehouse.ID, err)
+
+			if attempt < m.config.MaxRetries {
+				// Ждем перед повторной попыткой
+				select {
+				case <-time.After(m.config.RetryInterval):
+					// Продолжаем после задержки
+				case <-ctx.Done():
+					return ctx.Err()
+				}
+			}
+		}
+
+		if err != nil {
+			return fmt.Errorf("failed to get stocks after %d attempts: %w",
+				m.config.MaxRetries, err)
+		}
+
+		log.Printf("Получены данные об остатках для %d товаров на складе %d за %v",
+			len(barcodes), warehouse.ID, time.Since(batchStartTime))
+
+		// Подготовим массив обновлений для пакетной записи в БД
+		stockTime := time.Now()
+
+		// Подготовим массив записей для пакетной вставки в БД
+		var stockRecords []models.StockRecord
+
+		for _, stock := range stockResp.Stocks {
+			product, ok := productMap[stock.Sku]
+			if !ok {
+				continue
+			}
+
+			newStock := models.StockRecord{
+				ProductID:   product.ID,
+				WarehouseID: warehouse.ID,
+				Amount:      stock.Amount,
+				RecordedAt:  stockTime,
+			}
+
+			stockRecords = append(stockRecords, newStock)
+		}
+
+		// Проверяем изменения остатков и сохраняем данные
+		err = m.checkAndSaveStockChanges(ctx, stockRecords)
+		if err != nil {
+			log.Printf("Error checking and saving stock changes: %v", err)
+			return err
+		}
+
+		// Небольшая пауза между запросами к API для избежания блокировки
+		select {
+		case <-time.After(200 * time.Millisecond):
+			// Продолжаем после короткой паузы
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+
+	return nil
+}
+
+func (m *Service) checkAndSaveStockChanges(ctx context.Context, newStocks []models.StockRecord) error {
+	if len(newStocks) == 0 {
+		return nil
+	}
+
+	// Собираем ID продуктов и складов для пакетного запроса предыдущих остатков
+	productIDs := make([]int, 0, len(newStocks))
+	warehouseIDs := make([]int64, 0, len(newStocks))
+	productWarehouseMap := make(map[string]bool)
+
+	for _, stock := range newStocks {
+		key := fmt.Sprintf("%d_%d", stock.ProductID, stock.WarehouseID)
+		if !productWarehouseMap[key] {
+			productIDs = append(productIDs, stock.ProductID)
+			warehouseIDs = append(warehouseIDs, stock.WarehouseID)
+			productWarehouseMap[key] = true
+		}
+	}
+
+	// Получаем последние остатки для всех продуктов и складов одним запросом
+	lastStocks, err := db.GetLatestStocksForProducts(ctx, m.db, productIDs, warehouseIDs)
+	if err != nil {
+		return fmt.Errorf("error fetching last stocks: %w", err)
+	}
+
+	// Проверяем изменения и готовим уведомления
+	var _ []string
+
+	// Транзакция для пакетного сохранения
+	tx, err := m.db.BeginTxx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	// Подготовить запрос для пакетной вставки
+	stockInsertStmt, err := tx.PrepareContext(ctx, `
+        INSERT INTO stocks (product_id, warehouse_id, amount, recorded_at)
+        VALUES ($1, $2, $3, $4)
+    `)
+	if err != nil {
+		return fmt.Errorf("failed to prepare stock insert statement: %w", err)
+	}
+	defer stockInsertStmt.Close()
+
+	// Подготовить запрос для обновления статуса
+	updateStatusStmt, err := tx.PrepareContext(ctx, `
+        INSERT INTO monitoring_status (product_id, last_stock_check)
+        VALUES ($1, NOW())
+        ON CONFLICT (product_id)
+        DO UPDATE SET last_stock_check = NOW()
+    `)
+	if err != nil {
+		return fmt.Errorf("failed to prepare status update statement: %w", err)
+	}
+	defer updateStatusStmt.Close()
+
+	// Продукты, для которых нужно отправить уведомление
+	productsToNotify := make(map[int]struct{})
+	productNames := make(map[int]string) // Кеш имен продуктов для уведомлений
+
+	for _, newStock := range newStocks {
+		key := fmt.Sprintf("%d_%d", newStock.ProductID, newStock.WarehouseID)
+
+		// Проверяем, есть ли предыдущие данные
+		var lastStock models.StockRecord
+		var lastStockExists bool
+
+		if productMap, ok := lastStocks[newStock.ProductID]; ok {
+			lastStock, lastStockExists = productMap[newStock.WarehouseID]
+		}
+
+		// Сохраняем новые данные
+		_, err := stockInsertStmt.ExecContext(ctx,
+			newStock.ProductID,
+			newStock.WarehouseID,
+			newStock.Amount,
+			newStock.RecordedAt)
+		if err != nil {
+			return fmt.Errorf("failed to insert stock record: %w", err)
+		}
+
+		// Обновляем статус проверки
+		_, err = updateStatusStmt.ExecContext(ctx, newStock.ProductID)
+		if err != nil {
+			log.Printf("Warning: failed to update stock check status for product %d: %v",
+				newStock.ProductID, err)
+		}
+
+		// Проверяем значительные изменения
+		if lastStockExists {
+			stockDiff := float64(0)
+
+			if lastStock.Amount > 0 {
+				stockDiff = math.Abs(float64(newStock.Amount-lastStock.Amount)) / float64(lastStock.Amount) * 100
+			} else if newStock.Amount > 0 {
+				stockDiff = 100 // Появление товара в наличии
+			}
+
+			if stockDiff >= m.config.StockThreshold {
+				// Помечаем продукт для уведомления
+				productsToNotify[newStock.ProductID] = struct{}{}
+
+				// Получаем данные о продукте для уведомления
+				var product models.ProductRecord
+				err := tx.GetContext(ctx, &product,
+					"SELECT name, vendor_code FROM products WHERE id = $1",
+					newStock.ProductID)
+				if err == nil {
+					productNames[newStock.ProductID] = fmt.Sprintf("%s (арт. `%s`)",
+						product.Name, product.VendorCode)
+				}
+			}
+		}
+	}
+
+	// Фиксируем транзакцию
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("failed to commit transaction: %w", err)
+	}
+
+	// Отправляем уведомления с ограничением частоты
+	if len(productsToNotify) > 0 {
+		// Ограничиваем количество уведомлений
+		maxNotifications := 10
+		notificationCount := 0
+
+		for productID := range productsToNotify {
+			if notificationCount >= maxNotifications {
+				break
+			}
+
+			productName, ok := productNames[productID]
+			if !ok {
+				continue
+			}
+
+			message := fmt.Sprintf(
+				"📦 Обнаружено значительное изменение остатков!\n"+
+					"Товар: %s\n", productName)
+
+			if err := m.telegramBot.SendTelegramAlertWithParseMode(message, "Markdown"); err != nil {
+				log.Printf("Failed to send Telegram alert about stock change: %v", err)
+			}
+
+			notificationCount++
+		}
+
+		// Если уведомлений больше, чем лимит, добавляем общее сообщение
+		if len(productsToNotify) > maxNotifications {
+			extraMessage := fmt.Sprintf(
+				"... и еще %d товаров с изменениями остатков",
+				len(productsToNotify)-maxNotifications)
+
+			if err := m.telegramBot.SendTelegramAlert(extraMessage); err != nil {
+				log.Printf("Failed to send extra notification message: %v", err)
+			}
+		}
+	}
+
+	return nil
+}
+
+func (m *Service) processPricesForBatch(ctx context.Context, products []models.ProductRecord) error {
+	// Собираем nmIDs для API запроса
+	nmIDs := make([]int, 0, len(products))
+	nmIDToProduct := make(map[int]*models.ProductRecord)
+
+	for i := range products {
+		product := &products[i]
+		nmIDs = append(nmIDs, product.NmID)
+		nmIDToProduct[product.NmID] = product
+	}
+
+	// Обрабатываем товары с пагинацией
+	limit := 1000
+	offset := 0
+
+	for {
+		// Следим за таймаутом контекста
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+			// Продолжаем выполнение
+		}
+
+		// Запрашиваем цены с повторными попытками при ошибках
+		var goodsResp *models.GoodsPricesResponse
+		var err error
+
+		for attempt := 1; attempt <= m.config.MaxRetries; attempt++ {
+			goodsResp, err = m.GetGoodsPrices(ctx, limit, offset, 0) // 0 - без фильтра по nmID
+			if err == nil {
+				break
+			}
+
+			log.Printf("Attempt %d: Error getting goods prices: %v", attempt, err)
+
+			if attempt < m.config.MaxRetries {
+				// Ждем перед повторной попыткой
+				select {
+				case <-time.After(m.config.RetryInterval):
+					// Продолжаем после задержки
+				case <-ctx.Done():
+					return ctx.Err()
+				}
+			}
+		}
+
+		if err != nil {
+			return fmt.Errorf("failed to get goods prices after %d attempts: %w",
+				m.config.MaxRetries, err)
+		}
+
+		// Если нет данных, выходим из цикла
+		if len(goodsResp.Data.ListGoods) == 0 {
+			break
+		}
+
+		log.Printf("Получено %d товаров с ценами (offset: %d)",
+			len(goodsResp.Data.ListGoods), offset)
+
+		// Пакетная обработка полученных цен
+		err = m.processPriceBatch(ctx, goodsResp.Data.ListGoods, nmIDToProduct)
+		if err != nil {
+			log.Printf("Error processing price batch: %v", err)
+			return err
+		}
+
+		// Если получено меньше данных, чем запрошено - выходим из цикла
+		if len(goodsResp.Data.ListGoods) < limit {
+			break
+		}
+
+		// Увеличиваем смещение для следующего запроса
+		offset += limit
+
+		// Пауза между запросами
+		select {
+		case <-time.After(200 * time.Millisecond):
+			// Продолжаем после короткой паузы
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+
+	return nil
+}
+func (m *Service) processPriceBatch(
+	ctx context.Context,
+	goods []models.GoodsPricesResponseListGoods,
+	nmIDToProduct map[int]*models.ProductRecord,
+) error {
+	if len(goods) == 0 {
+		return nil
+	}
+
+	// Подготовка данных для пакетной обработки
+	var priceRecords []models.PriceRecord
+	var productIDs []int
+
+	recordTime := time.Now()
+
+	for _, good := range goods {
+		product, ok := nmIDToProduct[good.NmID]
+		if !ok {
+			continue
+		}
+
+		productIDs = append(productIDs, product.ID)
+
+		// Обрабатываем каждый размер товара
+		for _, size := range good.Sizes {
+			finalPrice := size.DiscountedPrice
+			clubPrice := size.ClubDiscountedPrice
+
+			priceRecords = append(priceRecords, models.PriceRecord{
+				ProductID:         product.ID,
+				SizeID:            size.SizeID,
+				Price:             size.Price,
+				Discount:          size.Discount,
+				ClubDiscount:      size.ClubDiscount,
+				FinalPrice:        int(finalPrice),
+				ClubFinalPrice:    int(clubPrice),
+				CurrencyIsoCode:   size.CurrencyIsoCode4217,
+				TechSizeName:      size.TechSizeName,
+				EditableSizePrice: size.EditableSizePrice,
+				RecordedAt:        recordTime,
+			})
+		}
+	}
+
+	// Получаем последние цены для сравнения
+	lastPrices, err := db.GetLatestPricesForProducts(ctx, m.db, productIDs)
+	if err != nil {
+		return fmt.Errorf("error fetching last prices: %w", err)
+	}
+
+	// Транзакция для пакетной вставки
+	tx, err := m.db.BeginTxx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	// Подготовка запросов
+	priceInsertStmt, err := tx.PrepareContext(ctx, `
+        INSERT INTO prices (
+            product_id, size_id, price, discount, club_discount, final_price, 
+            club_final_price, currency_iso_code, tech_size_name, editable_size_price, recorded_at
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+    `)
+	if err != nil {
+		return fmt.Errorf("failed to prepare price insert statement: %w", err)
+	}
+	defer priceInsertStmt.Close()
+
+	updateStatusStmt, err := tx.PrepareContext(ctx, `
+        INSERT INTO monitoring_status (product_id, last_price_check)
+        VALUES ($1, NOW())
+        ON CONFLICT (product_id)
+        DO UPDATE SET last_price_check = NOW()
+    `)
+	if err != nil {
+		return fmt.Errorf("failed to prepare status update statement: %w", err)
+	}
+	defer updateStatusStmt.Close()
+
+	// Продукты со значительными изменениями цен для уведомлений
+	significantChanges := make(map[int]struct{})
+	productChangeInfo := make(map[int]struct {
+		Name          string
+		VendorCode    string
+		OldPrice      int
+		OldDiscount   int
+		NewPrice      int
+		NewDiscount   int
+		ChangePercent float64
+	})
+
+	// Обрабатываем и сохраняем данные
+	for _, newPrice := range priceRecords {
+		// Поиск последней цены
+		lastPrice, hasLastPrice := lastPrices[newPrice.ProductID]
+
+		// Сохраняем новую цену
+		_, err := priceInsertStmt.ExecContext(ctx,
+			newPrice.ProductID, newPrice.SizeID, newPrice.Price,
+			newPrice.Discount, newPrice.ClubDiscount, newPrice.FinalPrice,
+			newPrice.ClubFinalPrice, newPrice.CurrencyIsoCode,
+			newPrice.TechSizeName, newPrice.EditableSizePrice, newPrice.RecordedAt)
+		if err != nil {
+			return fmt.Errorf("failed to insert price record: %w", err)
+		}
+
+		// Обновляем статус проверки
+		_, err = updateStatusStmt.ExecContext(ctx, newPrice.ProductID)
+		if err != nil {
+			log.Printf("Warning: failed to update price check status for product %d: %v",
+				newPrice.ProductID, err)
+		}
+
+		// Проверяем значительные изменения цен
+		if hasLastPrice && lastPrice.SizeID == newPrice.SizeID {
+			priceDiff := float64(0)
+
+			if lastPrice.Price > 0 {
+				priceDiff = (float64(newPrice.Price-lastPrice.Price) / float64(lastPrice.Price)) * 100
+			}
+
+			if priceDiff <= -m.config.PriceThreshold || priceDiff >= m.config.PriceThreshold {
+				significantChanges[newPrice.ProductID] = struct{}{}
+
+				// Получаем информацию о продукте для уведомления
+				var product models.ProductRecord
+				err := tx.GetContext(ctx, &product,
+					"SELECT name, vendor_code FROM products WHERE id = $1",
+					newPrice.ProductID)
+				if err == nil {
+					productChangeInfo[newPrice.ProductID] = struct {
+						Name          string
+						VendorCode    string
+						OldPrice      int
+						OldDiscount   int
+						NewPrice      int
+						NewDiscount   int
+						ChangePercent float64
+					}{
+						Name:          product.Name,
+						VendorCode:    product.VendorCode,
+						OldPrice:      lastPrice.FinalPrice,
+						OldDiscount:   lastPrice.Discount,
+						NewPrice:      newPrice.FinalPrice,
+						NewDiscount:   newPrice.Discount,
+						ChangePercent: priceDiff,
+					}
+				}
+			}
+		}
+	}
+
+	// Фиксируем транзакцию
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("failed to commit transaction: %w", err)
+	}
+
+	// Отправляем уведомления с ограничением частоты
+	if len(significantChanges) > 0 {
+		// Ограничиваем количество уведомлений
+		maxNotifications := 10
+		notificationCount := 0
+
+		for productID := range significantChanges {
+			if notificationCount >= maxNotifications {
+				break
+			}
+
+			changeInfo, ok := productChangeInfo[productID]
+			if !ok {
+				continue
+			}
+
+			message := fmt.Sprintf(
+				"🚨 Обнаружено значительное изменение цены!\n"+
+					"Товар: %s (арт. `%s`)\n"+
+					"Старая цена: %d руб (скидка %d%%)\n"+
+					"Новая цена: %d руб (скидка %d%%)\n"+
+					"Изменение: %.2f%%",
+				changeInfo.Name, changeInfo.VendorCode,
+				changeInfo.OldPrice, changeInfo.OldDiscount,
+				changeInfo.NewPrice, changeInfo.NewDiscount,
+				changeInfo.ChangePercent)
+
+			if err := m.telegramBot.SendTelegramAlertWithParseMode(message, "Markdown"); err != nil {
+				log.Printf("Failed to send Telegram alert about price change: %v", err)
+			}
+
+			notificationCount++
+		}
+
+		// Если уведомлений больше, чем лимит, добавляем общее сообщение
+		if len(significantChanges) > maxNotifications {
+			extraMessage := fmt.Sprintf(
+				"... и еще %d товаров с изменениями цен",
+				len(significantChanges)-maxNotifications)
+
+			if err := m.telegramBot.SendTelegramAlert(extraMessage); err != nil {
+				log.Printf("Failed to send extra price notification message: %v", err)
+			}
+		}
+	}
+
 	return nil
 }
 
