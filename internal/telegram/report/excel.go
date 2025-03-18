@@ -149,8 +149,8 @@ func (g *ExcelGenerator) GenerateStockReportExcel(ctx context.Context, startDate
 
 	// Set up headers for detail sheet
 	detailHeaders := []string{
-		"Product", "Vendor Code", "Warehouse", "Initial Stock", "Final Stock",
-		"Change", "Change (%)", "Min Stock", "Max Stock", "Records",
+		"Товар", "Артикул", "Начальная цена (₽)", "Конечная цена (₽)",
+		"Изменение (₽)", "Изменение (%)", "Мин. цена (₽)", "Макс. цена (₽)", "Записей",
 	}
 
 	for i, header := range detailHeaders {
@@ -453,8 +453,8 @@ func (g *ExcelGenerator) addStockTrendSheet(ctx context.Context, f *excelize.Fil
 
 	// Headers for the trend sheet
 	headers := []string{
-		"Product", "Vendor Code", "Warehouse", "Date/Time",
-		"Previous Stock", "New Stock", "Change", "Change (%)",
+		"Товар", "Артикул", "Дата/Время", "Предыдущая цена (₽)",
+		"Новая цена (₽)", "Изменение (₽)", "Изменение (%)", "Скидка (%)",
 	}
 
 	for i, header := range headers {
@@ -670,8 +670,8 @@ func (g *ExcelGenerator) GeneratePriceReportExcel(ctx context.Context, startDate
 
 	// Set up headers
 	headers := []string{
-		"Product", "Vendor Code", "Initial Price (₽)", "Final Price (₽)",
-		"Change (₽)", "Change (%)", "Min Price (₽)", "Max Price (₽)", "Records",
+		"Товар", "Артикул", "Начальная цена (₽)", "Конечная цена (₽)",
+		"Изменение (₽)", "Изменение (%)", "Мин. цена (₽)", "Макс. цена (₽)", "Записей",
 	}
 
 	for i, header := range headers {
@@ -785,21 +785,14 @@ func (g *ExcelGenerator) GeneratePriceReportExcel(ctx context.Context, startDate
 	// Fill in data rows
 	row := 2
 	for _, result := range results {
-		// Convert prices from kopecks to rubles for display
-		firstPrice := float64(result.FirstPrice) / 100
-		lastPrice := float64(result.LastPrice) / 100
-		priceChange := float64(result.PriceChange) / 100
-		minPrice := float64(result.MinPrice) / 100
-		maxPrice := float64(result.MaxPrice) / 100
-
 		f.SetCellValue(sheetName, fmt.Sprintf("A%d", row), result.Product.Name)
 		f.SetCellValue(sheetName, fmt.Sprintf("B%d", row), result.Product.VendorCode)
-		f.SetCellValue(sheetName, fmt.Sprintf("C%d", row), firstPrice)
-		f.SetCellValue(sheetName, fmt.Sprintf("D%d", row), lastPrice)
-		f.SetCellValue(sheetName, fmt.Sprintf("E%d", row), priceChange)
-		f.SetCellValue(sheetName, fmt.Sprintf("F%d", row), result.ChangePercent/100) // Decimal for percentage
-		f.SetCellValue(sheetName, fmt.Sprintf("G%d", row), minPrice)
-		f.SetCellValue(sheetName, fmt.Sprintf("H%d", row), maxPrice)
+		f.SetCellValue(sheetName, fmt.Sprintf("C%d", row), result.FirstPrice)
+		f.SetCellValue(sheetName, fmt.Sprintf("D%d", row), result.LastPrice)
+		f.SetCellValue(sheetName, fmt.Sprintf("E%d", row), result.PriceChange)
+		f.SetCellValue(sheetName, fmt.Sprintf("F%d", row), result.ChangePercent/100)
+		f.SetCellValue(sheetName, fmt.Sprintf("G%d", row), result.MinPrice)
+		f.SetCellValue(sheetName, fmt.Sprintf("H%d", row), result.MaxPrice)
 		f.SetCellValue(sheetName, fmt.Sprintf("I%d", row), result.RecordsCount)
 
 		row++
@@ -867,8 +860,8 @@ func (g *ExcelGenerator) addPriceTrendSheet(ctx context.Context, f *excelize.Fil
 
 	// Headers for the trend sheet
 	headers := []string{
-		"Product", "Vendor Code", "Date/Time", "Previous Price (₽)",
-		"New Price (₽)", "Change (₽)", "Change (%)", "Discount (%)",
+		"Товар", "Артикул", "Дата/Время", "Предыдущая цена (₽)",
+		"Новая цена (₽)", "Изменение (₽)", "Изменение (%)", "Скидка (%)",
 	}
 
 	for i, header := range headers {
@@ -941,6 +934,14 @@ func (g *ExcelGenerator) addPriceTrendSheet(ctx context.Context, f *excelize.Fil
 					ChangePercent: changePercent,
 					Discount:      prices[i].Discount,
 				})
+
+				significantChangeStyle, _ := f.NewStyle(&excelize.Style{
+					Fill: excelize.Fill{Type: "pattern", Color: []string{"#FFEB9C"}, Pattern: 1},
+				})
+				for col := 'A'; col <= 'H'; col++ {
+					cellRef := fmt.Sprintf("%c%d", col, row)
+					f.SetCellStyle(trendSheetName, cellRef, cellRef, significantChangeStyle)
+				}
 			}
 		}
 
@@ -950,30 +951,17 @@ func (g *ExcelGenerator) addPriceTrendSheet(ctx context.Context, f *excelize.Fil
 		}
 
 		productsProcessed++
-		firstEntryForProduct := true
 
-		// Add all significant changes to the sheet
 		for _, change := range significantChanges {
 			// Convert prices from kopecks to rubles
-			prevPrice := float64(change.PreviousPrice) / 100
-			newPrice := float64(change.NewPrice) / 100
-			priceChange := float64(change.Change) / 100
-
-			// Product name and vendor code (only for first entry)
-			if firstEntryForProduct {
-				f.SetCellValue(trendSheetName, fmt.Sprintf("A%d", row), product.Name)
-				f.SetCellValue(trendSheetName, fmt.Sprintf("B%d", row), product.VendorCode)
-				firstEntryForProduct = false
-			} else {
-				f.SetCellValue(trendSheetName, fmt.Sprintf("A%d", row), "")
-				f.SetCellValue(trendSheetName, fmt.Sprintf("B%d", row), "")
-			}
+			f.SetCellValue(trendSheetName, fmt.Sprintf("A%d", row), product.Name)
+			f.SetCellValue(trendSheetName, fmt.Sprintf("B%d", row), product.VendorCode)
 
 			// Change details
 			f.SetCellValue(trendSheetName, fmt.Sprintf("C%d", row), change.Time.Format("02.01.2006 15:04:05"))
-			f.SetCellValue(trendSheetName, fmt.Sprintf("D%d", row), prevPrice)
-			f.SetCellValue(trendSheetName, fmt.Sprintf("E%d", row), newPrice)
-			f.SetCellValue(trendSheetName, fmt.Sprintf("F%d", row), priceChange)
+			f.SetCellValue(trendSheetName, fmt.Sprintf("D%d", row), change.PreviousPrice)
+			f.SetCellValue(trendSheetName, fmt.Sprintf("E%d", row), change.NewPrice)
+			f.SetCellValue(trendSheetName, fmt.Sprintf("F%d", row), change.Change)
 			f.SetCellValue(trendSheetName, fmt.Sprintf("G%d", row), change.ChangePercent/100) // For percentage format
 			f.SetCellValue(trendSheetName, fmt.Sprintf("H%d", row), float64(change.Discount)/100)
 
@@ -982,6 +970,7 @@ func (g *ExcelGenerator) addPriceTrendSheet(ctx context.Context, f *excelize.Fil
 
 		// Add a blank row between products
 		row++
+
 	}
 
 	// Apply styles to numeric columns

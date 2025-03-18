@@ -43,35 +43,60 @@ type PDFGenerator struct {
 
 // NewPDFGenerator creates a new PDF report generator
 func NewPDFGenerator(db *sqlx.DB) *PDFGenerator {
-	// Find application's root directory for fonts
+	// Try multiple possible font locations
+	fontPaths := []string{}
+
+	// 1. Try relative to executable
 	execPath, err := os.Executable()
-	if err != nil {
-		log.Printf("Warning: Could not determine executable path: %v", err)
-		execPath = "."
+	if err == nil {
+		appDir := filepath.Dir(execPath)
+		fontPaths = append(fontPaths, filepath.Join(appDir, fontsDir))
 	}
 
-	appDir := filepath.Dir(execPath)
-	fontPath := filepath.Join(appDir, fontsDir)
+	// 2. Try current directory
+	cwd, err := os.Getwd()
+	if err == nil {
+		fontPaths = append(fontPaths, filepath.Join(cwd, fontsDir))
+	}
 
-	// Check if fonts directory exists
-	if _, err := os.Stat(fontPath); os.IsNotExist(err) {
-		log.Printf("Warning: Fonts directory not found at %s", fontPath)
+	// 3. Try parent directory of executable (for cases where exe is in a subdirectory)
+	if err == nil {
+		appParentDir := filepath.Dir(filepath.Dir(execPath))
+		fontPaths = append(fontPaths, filepath.Join(appParentDir, fontsDir))
+	}
 
-		// Try current directory
-		cwd, err := os.Getwd()
-		if err == nil {
-			fontPath = filepath.Join(cwd, fontsDir)
-			if _, err := os.Stat(fontPath); os.IsNotExist(err) {
-				log.Printf("Warning: Fonts directory not found at %s either", fontPath)
-				fontPath = ""
+	// 4. Try cmd/wbmonitoring/fonts path (based on project structure)
+	for _, baseDir := range []string{cwd, filepath.Dir(execPath)} {
+		// Move up to project root and then to cmd/wbmonitoring/fonts
+		projectRoot := baseDir
+		for i := 0; i < 3; i++ { // Try going up to 3 levels
+			fontPaths = append(fontPaths, filepath.Join(projectRoot, "cmd", "wbmonitoring", "fonts"))
+			projectRoot = filepath.Dir(projectRoot)
+		}
+	}
+
+	// Find first valid font directory
+	var validFontPath string
+	for _, path := range fontPaths {
+		if _, err := os.Stat(path); err == nil {
+			// Check if there are actually font files in this directory
+			arialPath := filepath.Join(path, arialRegularFile)
+			if _, err := os.Stat(arialPath); err == nil {
+				validFontPath = path
+				log.Printf("Found fonts directory at: %s", validFontPath)
+				break
 			}
 		}
+	}
+
+	if validFontPath == "" {
+		log.Printf("Warning: Could not find fonts directory. Tried paths: %v", fontPaths)
 	}
 
 	return &PDFGenerator{
 		db:          db,
 		fontsLoaded: false,
-		fontDirPath: fontPath,
+		fontDirPath: validFontPath,
 		defaultFont: fallbackFont,
 		defaultBold: fallbackFont,
 	}
@@ -170,7 +195,7 @@ func (g *PDFGenerator) GeneratePriceReportPDF(ctx context.Context, startDate, en
 	if g.defaultBold != fallbackFont {
 		pdf.SetFont(g.defaultBold, "", 16)
 	}
-	title := fmt.Sprintf("Price Report for Period %s - %s",
+	title := fmt.Sprintf("Отчет о ценах за период %s - %s",
 		startDate.Format("02.01.2006"),
 		endDate.Format("02.01.2006"))
 	pdf.SetX(30)
@@ -178,14 +203,14 @@ func (g *PDFGenerator) GeneratePriceReportPDF(ctx context.Context, startDate, en
 	pdf.Cell(nil, title)
 	pdf.Br(20)
 
-	// Define table headers
+	// Define table headers - русифицированы
 	headers := []string{
-		"Product", "Vendor Code", "Initial Price", "Final Price",
-		"Change (₽)", "Change (%)", "Min Price", "Max Price", "Records",
+		"Товар", "Артикул", "Начальная цена (коп.)", "Конечная цена (коп.)",
+		"Изменение (коп.)", "Изменение (%)", "Мин. цена (коп.)", "Макс. цена (коп.)", "Записей",
 	}
 
 	// Configure table layout
-	colWidths := []float64{120, 60, 50, 50, 50, 50, 50, 50, 50}
+	colWidths := []float64{120, 60, 70, 70, 70, 50, 70, 70, 50}
 	headerHeight := 30.0
 	rowHeight := 25.0
 
@@ -301,25 +326,25 @@ func (g *PDFGenerator) GeneratePriceReportPDF(ctx context.Context, startDate, en
 		pdf.Cell(nil, product.VendorCode)
 		x += colWidths[1]
 
-		// Initial price
+		// Initial price (в копейках, без деления на 100)
 		pdf.Rectangle(x, y, x+colWidths[2], y+rowHeight, "D", 0, 0)
 		pdf.SetX(x + 2)
 		pdf.SetY(y + 8)
-		pdf.Cell(nil, fmt.Sprintf("%.2f", float64(firstPrice)/100))
+		pdf.Cell(nil, fmt.Sprintf("%d", firstPrice))
 		x += colWidths[2]
 
-		// Final price
+		// Final price (в копейках, без деления на 100)
 		pdf.Rectangle(x, y, x+colWidths[3], y+rowHeight, "D", 0, 0)
 		pdf.SetX(x + 2)
 		pdf.SetY(y + 8)
-		pdf.Cell(nil, fmt.Sprintf("%.2f", float64(lastPrice)/100))
+		pdf.Cell(nil, fmt.Sprintf("%d", lastPrice))
 		x += colWidths[3]
 
-		// Price change
+		// Price change (в копейках, без деления на 100)
 		pdf.Rectangle(x, y, x+colWidths[4], y+rowHeight, "D", 0, 0)
 		pdf.SetX(x + 2)
 		pdf.SetY(y + 8)
-		pdf.Cell(nil, fmt.Sprintf("%.2f", float64(priceChange)/100))
+		pdf.Cell(nil, fmt.Sprintf("%d", priceChange))
 		x += colWidths[4]
 
 		// Percentage change
@@ -329,18 +354,18 @@ func (g *PDFGenerator) GeneratePriceReportPDF(ctx context.Context, startDate, en
 		pdf.Cell(nil, fmt.Sprintf("%.2f%%", priceChangePercent))
 		x += colWidths[5]
 
-		// Min price
+		// Min price (в копейках, без деления на 100)
 		pdf.Rectangle(x, y, x+colWidths[6], y+rowHeight, "D", 0, 0)
 		pdf.SetX(x + 2)
 		pdf.SetY(y + 8)
-		pdf.Cell(nil, fmt.Sprintf("%.2f", float64(minPrice)/100))
+		pdf.Cell(nil, fmt.Sprintf("%d", minPrice))
 		x += colWidths[6]
 
-		// Max price
+		// Max price (в копейках, без деления на 100)
 		pdf.Rectangle(x, y, x+colWidths[7], y+rowHeight, "D", 0, 0)
 		pdf.SetX(x + 2)
 		pdf.SetY(y + 8)
-		pdf.Cell(nil, fmt.Sprintf("%.2f", float64(maxPrice)/100))
+		pdf.Cell(nil, fmt.Sprintf("%d", maxPrice))
 		x += colWidths[7]
 
 		// Record count
@@ -359,11 +384,11 @@ func (g *PDFGenerator) GeneratePriceReportPDF(ctx context.Context, startDate, en
 		}
 		pdf.SetX(30)
 		pdf.SetY(y + 20)
-		pdf.Cell(nil, fmt.Sprintf("No products found with price changes greater than %.1f%%", minChangePercent))
+		pdf.Cell(nil, fmt.Sprintf("Не найдено товаров с изменением цены более %.1f%%", minChangePercent))
 	}
 
 	// Save the PDF to a temporary file
-	filename := fmt.Sprintf("price_report_%s_%s.pdf",
+	filename := fmt.Sprintf("отчет_о_ценах_%s_%s.pdf",
 		startDate.Format("02-01-2006"),
 		endDate.Format("02-01-2006"))
 	filePath := filepath.Join(os.TempDir(), filename)
@@ -403,7 +428,7 @@ func (g *PDFGenerator) GenerateStockReportPDF(ctx context.Context, startDate, en
 	if g.defaultBold != fallbackFont {
 		pdf.SetFont(g.defaultBold, "", 16)
 	}
-	title := fmt.Sprintf("Stock Report for Period %s - %s",
+	title := fmt.Sprintf("Отчет о запасах за период %s - %s",
 		startDate.Format("02.01.2006"),
 		endDate.Format("02.01.2006"))
 	pdf.SetX(30)
@@ -412,7 +437,7 @@ func (g *PDFGenerator) GenerateStockReportPDF(ctx context.Context, startDate, en
 	pdf.Br(20)
 
 	// Define table headers
-	headers := []string{"Product", "Vendor Code"}
+	headers := []string{"Товар", "Артикул"}
 
 	// Add warehouse names as headers
 	// Limit number of warehouses to display to prevent too wide table
@@ -420,7 +445,7 @@ func (g *PDFGenerator) GenerateStockReportPDF(ctx context.Context, startDate, en
 	displayedWarehouses := warehouses
 	if len(warehouses) > maxWarehousesToDisplay {
 		displayedWarehouses = warehouses[:maxWarehousesToDisplay]
-		headers = append(headers, "W1", "W2", "W3", "W4", "W5")
+		headers = append(headers, "С1", "С2", "С3", "С4", "С5")
 	} else {
 		for _, wh := range warehouses {
 			shortName := wh.Name
@@ -431,7 +456,7 @@ func (g *PDFGenerator) GenerateStockReportPDF(ctx context.Context, startDate, en
 		}
 	}
 
-	headers = append(headers, "Total", "Change")
+	headers = append(headers, "Всего", "Изменение")
 
 	// Configure table layout
 	colWidths := []float64{120, 60}
@@ -854,8 +879,7 @@ func (g *PDFGenerator) GenerateStockReportPDF(ctx context.Context, startDate, en
 		}
 	}
 
-	// Save the PDF to a temporary file
-	filename := fmt.Sprintf("stock_report_%s_%s.pdf",
+	filename := fmt.Sprintf("отчет_о_запасах_%s_%s.pdf",
 		startDate.Format("02-01-2006"),
 		endDate.Format("02-01-2006"))
 	filePath := filepath.Join(os.TempDir(), filename)
