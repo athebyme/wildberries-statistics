@@ -821,35 +821,15 @@ func (b *Bot) generateReportFile(reportType, period, format string) (string, str
 
 	if reportType == "prices" {
 		if format == "excel" {
-			// Используем новый Excel генератор если он доступен
-			if b.excelGenerator != nil {
-				return b.excelGenerator.GeneratePriceReportExcel(ctx, startDate, endDate)
-			}
-			// Иначе используем старый метод
-			return b.generatePriceReportExcelToFile(startDate, endDate, b.config)
+			return b.excelGenerator.GeneratePriceReportExcel(ctx, startDate, endDate)
 		} else if format == "pdf" {
-			// Используем новый PDF генератор если он доступен
-			if b.pdfGenerator != nil {
-				return b.pdfGenerator.GeneratePriceReportPDF(ctx, startDate, endDate, b.config.MinPriceChangePercent)
-			}
-			// Иначе используем старый метод
-			return b.generatePriceReportPDFToFile(startDate, endDate, b.config)
+			return b.pdfGenerator.GeneratePriceReportPDF(ctx, startDate, endDate, b.config.MinPriceChangePercent)
 		}
 	} else if reportType == "stocks" {
 		if format == "excel" {
-			// Используем новый Excel генератор если он доступен
-			if b.excelGenerator != nil {
-				return b.excelGenerator.GenerateStockReportExcel(ctx, startDate, endDate)
-			}
-			// Иначе используем старый метод
-			return b.generateStockReportExcelToFile(startDate, endDate, b.config)
+			return b.excelGenerator.GenerateStockReportExcel(ctx, startDate, endDate)
 		} else if format == "pdf" {
-			// Используем новый PDF генератор если он доступен
-			if b.pdfGenerator != nil {
-				return b.pdfGenerator.GenerateStockReportPDF(ctx, startDate, endDate, b.config.MinStockChangePercent)
-			}
-			// Иначе используем старый метод
-			return b.generateStockReportPDFToFile(startDate, endDate, b.config)
+			return b.pdfGenerator.GenerateStockReportPDF(ctx, startDate, endDate, b.config.MinStockChangePercent)
 		}
 	}
 

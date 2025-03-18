@@ -744,8 +744,9 @@ func (g *ExcelGenerator) GeneratePriceReportExcel(ctx context.Context, startDate
 	return filePath, filename, nil
 }
 
+// Исправленная функция addPriceTrendSheet для корректного отображения динамики цен
 func (g *ExcelGenerator) addPriceTrendSheet(ctx context.Context, f *excelize.File, products []models.ProductRecord, startDate, endDate time.Time) error {
-	trendSheetName := "Price Trends"
+	trendSheetName := "Динамика цен"
 	_, err := f.NewSheet(trendSheetName)
 	if err != nil {
 		return fmt.Errorf("error creating trend sheet: %w", err)
@@ -767,8 +768,8 @@ func (g *ExcelGenerator) addPriceTrendSheet(ctx context.Context, f *excelize.Fil
 	}
 
 	headers := []string{
-		"Товар", "Артикул", "Дата/Время", "Предыдущая цена (₽)",
-		"Новая цена (₽)", "Изменение (₽)", "Изменение (%)", "Скидка (%)",
+		"Товар", "Артикул", "Дата/Время", "Предыдущая цена (коп.)",
+		"Новая цена (коп.)", "Изменение (коп.)", "Изменение (%)", "Скидка (%)",
 	}
 
 	for i, header := range headers {
@@ -778,25 +779,42 @@ func (g *ExcelGenerator) addPriceTrendSheet(ctx context.Context, f *excelize.Fil
 
 	f.SetCellStyle(trendSheetName, "A1", string(rune('A'+len(headers)-1))+"1", headerStyle)
 
+	// Создаем стиль для выделения значительных изменений
+	significantChangeStyle, _ := f.NewStyle(&excelize.Style{
+		Fill: excelize.Fill{Type: "pattern", Color: []string{"#ffeb9c"}, Pattern: 1},
+	})
+
 	row := 2
 	productsProcessed := 0
-	maxProductsToProcess := 20
+	maxProductsToProcess := 100 // Увеличено с 20
 
+	// Для отладки - сохраняем информацию обо всех обработанных продуктах
+	var debugInfo []string
+
+	// Перебираем все продукты
 	for _, product := range products {
 		if productsProcessed >= maxProductsToProcess {
 			break
 		}
 
+		// Отладочная информация
+		debugInfo = append(debugInfo, fmt.Sprintf("Обработка продукта: %s (id: %d)", product.Name, product.ID))
+
+		// Запрашиваем историю цен для продукта
 		prices, err := db.GetPricesForPeriod(ctx, g.db, product.ID, startDate, endDate)
 		if err != nil {
-			log.Printf("Error getting prices for product %d: %v", product.ID, err)
+			debugInfo = append(debugInfo, fmt.Sprintf("  Ошибка при получении цен: %v", err))
 			continue
 		}
 
 		if len(prices) < 2 {
+			debugInfo = append(debugInfo, fmt.Sprintf("  Найдено только %d записей о ценах (нужно минимум 2)", len(prices)))
 			continue
 		}
 
+		debugInfo = append(debugInfo, fmt.Sprintf("  Найдено %d записей о ценах", len(prices)))
+
+		// Массив для хранения значительных изменений
 		var significantChanges []struct {
 			Time          time.Time
 			PreviousPrice int
@@ -806,6 +824,8 @@ func (g *ExcelGenerator) addPriceTrendSheet(ctx context.Context, f *excelize.Fil
 			Discount      int
 		}
 
+		// ВАЖНОЕ ИСПРАВЛЕНИЕ: Проверяем все записи на наличие изменений
+		// Используем Price вместо FinalPrice
 		for i := 1; i < len(prices); i++ {
 			previousPrice := prices[i-1].Price
 			newPrice := prices[i].Price
@@ -820,7 +840,20 @@ func (g *ExcelGenerator) addPriceTrendSheet(ctx context.Context, f *excelize.Fil
 				changePercent = float64(priceChange) / float64(previousPrice) * 100
 			}
 
+			// Отладка - записываем информацию об изменении
+			debugInfo = append(debugInfo, fmt.Sprintf("  Изменение #%d: %d -> %d (%.2f%%)",
+				i, previousPrice, newPrice, changePercent))
+
+			// Проверяем, превышает ли изменение порог
 			if math.Abs(changePercent) >= g.reportConfig.MinPriceChangePercent {
+				debugInfo = append(debugInfo, "    Значительное изменение!")
+
+				// Вычисляем скидку (соотношение FinalPrice к Price)
+				discount := 0
+				if prices[i].Price > 0 && prices[i].FinalPrice > 0 {
+					discount = int((1.0 - float64(prices[i].FinalPrice)/float64(prices[i].Price)) * 100)
+				}
+
 				significantChanges = append(significantChanges, struct {
 					Time          time.Time
 					PreviousPrice int
@@ -834,27 +867,22 @@ func (g *ExcelGenerator) addPriceTrendSheet(ctx context.Context, f *excelize.Fil
 					NewPrice:      newPrice,
 					Change:        priceChange,
 					ChangePercent: changePercent,
-					Discount:      minimum(newPrice, previousPrice) / maximum(newPrice, previousPrice) * 10,
+					Discount:      discount,
 				})
-			}
-
-			significantChangeStyle, _ := f.NewStyle(&excelize.Style{
-				Fill:   excelize.Fill{Type: "pattern", Color: []string{"#ffeb9c"}, Pattern: 1},
-				Border: []excelize.Border{{Type: "top", Color: "#000000", Style: 1}},
-			})
-			for col := 'A'; col <= 'H'; col++ {
-				cellRef := fmt.Sprintf("%c%d", col, row)
-				f.SetCellStyle(trendSheetName, cellRef, cellRef, significantChangeStyle)
 			}
 		}
 
 		if len(significantChanges) == 0 {
+			debugInfo = append(debugInfo, "  Нет значительных изменений цен для этого продукта")
 			continue
 		}
 
 		productsProcessed++
+		debugInfo = append(debugInfo, fmt.Sprintf("  Добавляется %d значительных изменений в отчет", len(significantChanges)))
 
+		// Добавляем каждое значительное изменение в таблицу
 		for _, change := range significantChanges {
+			// Имя товара и артикул заполняются для каждой строки
 			f.SetCellValue(trendSheetName, fmt.Sprintf("A%d", row), product.Name)
 			f.SetCellValue(trendSheetName, fmt.Sprintf("B%d", row), product.VendorCode)
 
@@ -865,28 +893,51 @@ func (g *ExcelGenerator) addPriceTrendSheet(ctx context.Context, f *excelize.Fil
 			f.SetCellValue(trendSheetName, fmt.Sprintf("G%d", row), change.ChangePercent/100)
 			f.SetCellValue(trendSheetName, fmt.Sprintf("H%d", row), float64(change.Discount)/100)
 
+			// Применяем выделение цветом для строк с значительными изменениями
+			if math.Abs(change.ChangePercent) > 10.0 {
+				for col := 'A'; col <= 'H'; col++ {
+					cellRef := fmt.Sprintf("%c%d", col, row)
+					f.SetCellStyle(trendSheetName, cellRef, cellRef, significantChangeStyle)
+				}
+			}
+
 			row++
+		}
+
+		row++ // Пустая строка между товарами
+	}
+
+	// Если нет данных о значительных изменениях, добавляем сообщение и отладочную информацию
+	if row == 2 {
+		f.SetCellValue(trendSheetName, "A2", "Не найдено значительных изменений цен за выбранный период")
+
+		// Добавляем отладочную информацию на отдельный лист
+		debugSheetName := "Debug Info"
+		f.NewSheet(debugSheetName)
+		for i, line := range debugInfo {
+			f.SetCellValue(debugSheetName, fmt.Sprintf("A%d", i+1), line)
 		}
 
 		row++
 	}
 
+	// Применяем стили для чисел и процентов
 	if row > 2 {
-		numberStyle, _ := f.NewStyle(&excelize.Style{NumFmt: 2}) // 2 decimal places
+		numberStyle, _ := f.NewStyle(&excelize.Style{NumFmt: 0}) // целые числа для копеек
 		percentStyle, _ := f.NewStyle(&excelize.Style{NumFmt: 10})
 
 		f.SetCellStyle(trendSheetName, "D2", fmt.Sprintf("F%d", row-1), numberStyle)
 		f.SetCellStyle(trendSheetName, "G2", fmt.Sprintf("H%d", row-1), percentStyle)
 	}
 
+	// Настраиваем ширину столбцов
 	for i := range headers {
 		col := string(rune('A' + i))
 		f.SetColWidth(trendSheetName, col, col, 15)
 	}
 
-	f.SetColWidth(trendSheetName, "C", "C", 20)
-
-	f.SetColWidth(trendSheetName, "A", "A", 30)
+	f.SetColWidth(trendSheetName, "C", "C", 20) // Для даты/времени
+	f.SetColWidth(trendSheetName, "A", "A", 30) // Для названия товара
 
 	return nil
 }

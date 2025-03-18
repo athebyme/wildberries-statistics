@@ -62,26 +62,20 @@ func NewMonitoringService(cfg config.Config) (*Service, error) {
 		return nil, fmt.Errorf("initializing telegram bot: %w", err)
 	}
 
-	// Инициализируем улучшенные сервисы для бота
-	// (можно вынести в отдельную функцию или сделать опциональным)
 	if cfg.UseImprovedServices {
-		// Создаем EmailService
 		emailService, err := telegram.NewEmailService(database)
 		if err != nil {
 			log.Printf("Warning: Failed to initialize EmailService: %v", err)
 		}
 
-		// Создаем PDFGenerator
 		pdfGenerator := report.NewPDFGenerator(database)
 
-		// Создаем ExcelGenerator
 		excelGenerator := report.NewExcelGenerator(
 			database,
 			reportConfig,
-			cfg.WorkerCount, // Используем настройку воркеров из конфига
+			cfg.WorkerCount,
 		)
 
-		// Обновляем бота с новыми сервисами
 		if emailService != nil && pdfGenerator != nil && excelGenerator != nil {
 			if err := telegramBot.UpdateReportServices(emailService, pdfGenerator, excelGenerator); err != nil {
 				log.Printf("Warning: Failed to update bot with improved services: %v", err)
@@ -525,8 +519,8 @@ func (m *Service) CheckPriceChanges(ctx context.Context, product *models.Product
 
 	// Вычисляем процент изменения
 	priceDiff := float64(0)
-	if lastPrice.FinalPrice > 0 {
-		priceDiff = (float64(newPrice.FinalPrice-lastPrice.FinalPrice) / float64(lastPrice.FinalPrice)) * 100
+	if lastPrice.Price > 0 {
+		priceDiff = (float64(newPrice.Price-lastPrice.Price) / float64(lastPrice.Price)) * 100
 	}
 
 	// Сохраняем новую цену
