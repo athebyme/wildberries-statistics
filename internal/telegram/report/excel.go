@@ -932,7 +932,7 @@ func (g *ExcelGenerator) addPriceTrendSheet(ctx context.Context, f *excelize.Fil
 					NewPrice:      newPrice,
 					Change:        priceChange,
 					ChangePercent: changePercent,
-					Discount:      prices[i].FinalPrice / prices[i].Price * 100,
+					Discount:      prices[i].FinalPrice / prices[i].Price * 10,
 				})
 			}
 
