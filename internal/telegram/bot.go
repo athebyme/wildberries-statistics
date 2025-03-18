@@ -14,7 +14,6 @@ import (
 	"wbmonitoring/monitoring/internal/telegram/report"
 )
 
-// Bot представляет Telegram-бота
 type Bot struct {
 	api              *tgbotapi.BotAPI
 	chatID           int64
@@ -61,7 +60,6 @@ func NewBot(token string, chatID int64, db *sqlx.DB, allowedUserIDs []int64, con
 	return bot, nil
 }
 
-// UpdateReportServices обновляет сервисы отчетов для телеграм-бота
 func (b *Bot) UpdateReportServices(emailService *EmailService, pdfGenerator *report.PDFGenerator, excelGenerator *report.ExcelGenerator) error {
 	b.emailService = emailService
 	b.pdfGenerator = pdfGenerator
@@ -97,14 +95,12 @@ func (b *Bot) StartBot(ctx context.Context) {
 	}
 }
 
-// SendTelegramAlert отправляет оповещение в Telegram
 func (b *Bot) SendTelegramAlert(message string) error {
 	msg := tgbotapi.NewMessage(b.chatID, message)
 	_, err := b.api.Send(msg)
 	return err
 }
 
-// SendTelegramAlertWithParseMode отправляет оповещение в Telegram с указанным режимом форматирования
 func (b *Bot) SendTelegramAlertWithParseMode(message, parseMode string) error {
 	msg := tgbotapi.NewMessage(b.chatID, message)
 	msg.ParseMode = parseMode
@@ -112,7 +108,6 @@ func (b *Bot) SendTelegramAlertWithParseMode(message, parseMode string) error {
 	return err
 }
 
-// sendWelcomeMessage отправляет приветственное сообщение
 func (b *Bot) sendWelcomeMessage(chatID int64) {
 	welcomeText := `Добро пожаловать в бот мониторинга Wildberries!
 
@@ -132,15 +127,13 @@ func (b *Bot) trackReportMessage(chatID int64, messageID int) {
 	b.reportMessageIDs[chatID] = append(b.reportMessageIDs[chatID], messageID)
 }
 
-// Add a method to delete all tracked messages for a chat
 func (b *Bot) cleanupReportMessages(chatID int64) {
-	// Get all message IDs for this chat
+
 	messageIDs, exists := b.reportMessageIDs[chatID]
 	if !exists || len(messageIDs) == 0 {
 		return
 	}
 
-	// Delete each message
 	for _, msgID := range messageIDs {
 		deleteMsg := tgbotapi.NewDeleteMessage(chatID, msgID)
 		_, err := b.api.Request(deleteMsg)
@@ -149,7 +142,6 @@ func (b *Bot) cleanupReportMessages(chatID int64) {
 		}
 	}
 
-	// Clear the tracking list
 	b.reportMessageIDs[chatID] = make([]int, 0)
 }
 
@@ -161,7 +153,6 @@ func (b *Bot) sendAndTrackMessage(msg tgbotapi.MessageConfig) (tgbotapi.Message,
 	return sentMsg, err
 }
 
-// sendHelpMessage отправляет сообщение с помощью
 func (b *Bot) sendHelpMessage(chatID int64) {
 	helpText := `Доступные команды:
 
@@ -177,7 +168,6 @@ func (b *Bot) sendHelpMessage(chatID int64) {
 	b.api.Send(msg)
 }
 
-// getMainKeyboard возвращает основную клавиатуру бота
 func (b *Bot) getMainKeyboard() tgbotapi.ReplyKeyboardMarkup {
 	keyboard := tgbotapi.NewReplyKeyboard(
 		tgbotapi.NewKeyboardButtonRow(
@@ -344,7 +334,6 @@ func (b *Bot) handleCallbackQuery(query *tgbotapi.CallbackQuery) {
 	b.api.Send(tgbotapi.NewMessage(query.Message.Chat.ID, "Произошла ошибка при обработке запроса. Пожалуйста, начните сначала /report"))
 }
 
-// getPeriodName возвращает человекочитаемое название периода
 func (b *Bot) getPeriodName(period string) string {
 	switch period {
 	case "day":
@@ -378,7 +367,6 @@ func (b *Bot) getPeriodName(period string) string {
 	return period
 }
 
-// handleCustomPeriodSelection запрашивает у пользователя ввод произвольного периода
 func (b *Bot) handleCustomPeriodSelection(chatID int64, reportType string) {
 	// Устанавливаем состояние пользователя
 	b.setUserState(chatID, "waiting_custom_period_"+reportType)
@@ -393,7 +381,6 @@ func (b *Bot) handleCustomPeriodSelection(chatID int64, reportType string) {
 	}
 }
 
-// parseCustomPeriod проверяет и парсит произвольный период
 func (b *Bot) parseCustomPeriod(periodStr string) (startDate, endDate time.Time, err error) {
 	// Разделяем строку на две даты
 	dates := strings.Split(periodStr, "-")
@@ -422,7 +409,6 @@ func (b *Bot) parseCustomPeriod(periodStr string) (startDate, endDate time.Time,
 	return startDate, endDate, nil
 }
 
-// setUserState сохраняет текущее состояние пользователя
 func (b *Bot) setUserState(chatID int64, state string) {
 	// Предполагается, что в боте есть карта для хранения состояний пользователей
 	// Если ее нет, нужно добавить в структуру Bot поле userStates
@@ -432,7 +418,6 @@ func (b *Bot) setUserState(chatID int64, state string) {
 	b.userStates[chatID] = state
 }
 
-// getUserState получает текущее состояние пользователя
 func (b *Bot) getUserState(chatID int64) string {
 	if state, ok := b.userStates[chatID]; ok {
 		return state
@@ -440,12 +425,10 @@ func (b *Bot) getUserState(chatID int64) string {
 	return ""
 }
 
-// clearUserState очищает состояние пользователя
 func (b *Bot) clearUserState(chatID int64) {
 	delete(b.userStates, chatID)
 }
 
-// sendPeriodSelection отправляет меню выбора периода для отчета
 func (b *Bot) sendPeriodSelection(chatID int64, reportType string) {
 	var msgText string
 	if reportType == "prices" {
@@ -475,7 +458,6 @@ func (b *Bot) sendPeriodSelection(chatID int64, reportType string) {
 	}
 }
 
-// sendFormatSelection отправляет меню выбора формата отчета
 func (b *Bot) sendFormatSelection(chatID int64, reportType string, period string) {
 	var msgText string
 	if reportType == "prices" {
@@ -504,7 +486,6 @@ func (b *Bot) sendFormatSelection(chatID int64, reportType string, period string
 	}
 }
 
-// SendDailyReport отправляет ежедневный отчет по ценам и остаткам в чат
 func (b *Bot) SendDailyReport(ctx context.Context) error {
 	// Определяем даты для отчета: сегодня с 00:00 до текущего момента
 	now := time.Now()
@@ -659,7 +640,6 @@ func (b *Bot) sendReportToEmail(chatID int64, userID int64, reportType, period, 
 		return
 	}
 
-	// Clean up all previous messages
 	b.cleanupReportMessages(chatID)
 
 	// Спрашиваем, хочет ли пользователь сохранить email
@@ -792,7 +772,6 @@ func (b *Bot) sendEmailLegacy(to string, reportType string, period string, fileP
 	return d.DialAndSend(m)
 }
 
-// generateReportFile генерирует отчёт за заданный период и сохраняет его в файл,
 // возвращая путь к файлу, имя отчёта и ошибку, если она произошла.
 func (b *Bot) generateReportFile(reportType, period, format string) (string, string, error) {
 	var startDate, endDate time.Time
@@ -879,7 +858,7 @@ func (b *Bot) generateReportFile(reportType, period, format string) (string, str
 
 // Обновленный метод handleMessage
 func (b *Bot) handleMessage(message *tgbotapi.Message) {
-	// If this is a message related to report generation, track it
+
 	state := b.getUserState(message.Chat.ID)
 	if strings.HasPrefix(state, "waiting_custom_period_") ||
 		strings.HasPrefix(state, "waiting_email_") {
@@ -949,7 +928,6 @@ func (b *Bot) handleMessage(message *tgbotapi.Message) {
 	}
 }
 
-// Initialize initializes the bot and its dependencies
 func (b *Bot) Initialize() error {
 	// Инициализация таблицы для хранения email адресов
 	if err := b.initializeEmailStorage(); err != nil {
@@ -958,15 +936,13 @@ func (b *Bot) Initialize() error {
 	return nil
 }
 
-// initializeEmailStorage creates the email storage table if it doesn't exist
 func (b *Bot) initializeEmailStorage() error {
-	// If we have an EmailService, delegate email storage initialization to it
+
 	if b.emailService != nil {
 		log.Printf("Используется EmailService для инициализации хранилища email")
-		return nil // EmailService handles its own initialization in its constructor
+		return nil
 	}
 
-	// Legacy initialization if EmailService is not available
 	log.Printf("Используется прямая инициализация хранилища email")
 	_, err := b.db.Exec(`
 		CREATE TABLE IF NOT EXISTS user_emails (
@@ -983,13 +959,11 @@ func (b *Bot) initializeEmailStorage() error {
 	return nil
 }
 
-// getUserEmail is a unified method to get user email that works with both approaches
 func (b *Bot) getUserEmail(userID int64) (string, error) {
-	// Try using EmailService if available
+
 	if b.emailService != nil {
 		return b.emailService.GetUserEmail(userID)
 	}
 
-	// Fall back to legacy method
 	return b.getUserEmailLegacy(userID)
 }

@@ -78,14 +78,13 @@ type PriceRecord struct {
 
 // Структура для записи о складских остатках
 type StockRecord struct {
-	ID          int       `db:"id"` // Add this line
+	ID          int       `db:"id"`
 	ProductID   int       `db:"product_id"`
 	WarehouseID int64     `db:"warehouse_id"`
 	Amount      int       `db:"amount"`
 	RecordedAt  time.Time `db:"recorded_at"`
 }
 
-// ProductRecord представляет информацию о продукте
 type ProductRecord struct {
 	ID         int       `db:"id"`
 	NmID       int       `db:"nm_id"`
@@ -133,7 +132,6 @@ type Settings struct {
 	Cursor Cursor `json:"cursor"`
 }
 
-// CreateRequestBody creates request body for SearchEngine API calls.
 func (s *Settings) CreateRequestBody() (*bytes.Buffer, error) {
 	wrapper := SettingsRequestWrapper{Settings: *s}
 
@@ -234,7 +232,7 @@ type Dimensions struct {
 }
 
 type Charc struct {
-	Id    int    `json:"id"`    // ID характеристики
+	Id    int    `json:"id"`
 	Name  string `json:"name"`  // Название характеристики
 	Value any    `json:"value"` // Значение характеристики. Тип значения зависит от типа характеристики
 }
@@ -251,7 +249,6 @@ type Tag struct {
 	Color string `json:"color"`
 }
 
-// PriceSnapshot represents a hourly snapshot of price data
 type PriceSnapshot struct {
 	ID                int       `db:"id"`
 	ProductID         int       `db:"product_id"`
@@ -267,7 +264,6 @@ type PriceSnapshot struct {
 	SnapshotTime      time.Time `db:"snapshot_time"`
 }
 
-// StockSnapshot represents a hourly snapshot of stock data
 type StockSnapshot struct {
 	ID           int       `db:"id"`
 	ProductID    int       `db:"product_id"`

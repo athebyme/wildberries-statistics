@@ -17,22 +17,17 @@ import (
 )
 
 const (
-	// Fonts directory relative to application root
 	fontsDir = "fonts"
 
-	// Font file names - make sure these files exist in the fonts directory
 	arialRegularFile = "arial.ttf"
 	arialBoldFile    = "arialbd.ttf"
 
-	// Default font names
 	arialRegular = "arial"
 	arialBold    = "arial-bold"
 
-	// Fallback font name if fonts can't be loaded
 	fallbackFont = ""
 )
 
-// PDFGenerator handles PDF report generation
 type PDFGenerator struct {
 	db          *sqlx.DB
 	fontsLoaded bool
@@ -41,9 +36,8 @@ type PDFGenerator struct {
 	defaultBold string
 }
 
-// NewPDFGenerator creates a new PDF report generator
 func NewPDFGenerator(db *sqlx.DB) *PDFGenerator {
-	// Try multiple possible font locations
+
 	fontPaths := []string{}
 
 	// 1. Try relative to executable
@@ -67,19 +61,18 @@ func NewPDFGenerator(db *sqlx.DB) *PDFGenerator {
 
 	// 4. Try cmd/wbmonitoring/fonts path (based on project structure)
 	for _, baseDir := range []string{cwd, filepath.Dir(execPath)} {
-		// Move up to project root and then to cmd/wbmonitoring/fonts
+
 		projectRoot := baseDir
-		for i := 0; i < 3; i++ { // Try going up to 3 levels
+		for i := 0; i < 3; i++ {
 			fontPaths = append(fontPaths, filepath.Join(projectRoot, "cmd", "wbmonitoring", "fonts"))
 			projectRoot = filepath.Dir(projectRoot)
 		}
 	}
 
-	// Find first valid font directory
 	var validFontPath string
 	for _, path := range fontPaths {
 		if _, err := os.Stat(path); err == nil {
-			// Check if there are actually font files in this directory
+
 			arialPath := filepath.Join(path, arialRegularFile)
 			if _, err := os.Stat(arialPath); err == nil {
 				validFontPath = path
@@ -102,17 +95,15 @@ func NewPDFGenerator(db *sqlx.DB) *PDFGenerator {
 	}
 }
 
-// loadFonts attempts to load fonts and sets the fontsLoaded flag
 func (g *PDFGenerator) loadFonts(pdf *gopdf.GoPdf) error {
 	if g.fontsLoaded {
-		return nil // Fonts already loaded
+		return nil
 	}
 
 	if g.fontDirPath == "" {
 		return fmt.Errorf("fonts directory not found")
 	}
 
-	// Try to load regular Arial font
 	arialPath := filepath.Join(g.fontDirPath, arialRegularFile)
 	if _, err := os.Stat(arialPath); err == nil {
 		err := pdf.AddTTFFont(arialRegular, arialPath)
@@ -125,7 +116,6 @@ func (g *PDFGenerator) loadFonts(pdf *gopdf.GoPdf) error {
 		log.Printf("Warning: Arial font file not found at %s", arialPath)
 	}
 
-	// Try to load bold Arial font
 	arialBoldPath := filepath.Join(g.fontDirPath, arialBoldFile)
 	if _, err := os.Stat(arialBoldPath); err == nil {
 		err := pdf.AddTTFFont(arialBold, arialBoldPath)
@@ -138,7 +128,6 @@ func (g *PDFGenerator) loadFonts(pdf *gopdf.GoPdf) error {
 		log.Printf("Warning: Arial Bold font file not found at %s", arialBoldPath)
 	}
 
-	// Only mark fonts as loaded if at least one font was loaded
 	g.fontsLoaded = (g.defaultFont != fallbackFont) || (g.defaultBold != fallbackFont)
 
 	if !g.fontsLoaded {
@@ -148,11 +137,9 @@ func (g *PDFGenerator) loadFonts(pdf *gopdf.GoPdf) error {
 	return nil
 }
 
-// createBasicPDF creates a new PDF document and loads fonts
 func (g *PDFGenerator) createBasicPDF(orientation string) (*gopdf.GoPdf, error) {
 	var pdf *gopdf.GoPdf = new(gopdf.GoPdf)
 
-	// Set page size based on orientation
 	switch orientation {
 	case "landscape":
 		pdf.Start(gopdf.Config{PageSize: *gopdf.PageSizeA4Landscape})
@@ -164,7 +151,6 @@ func (g *PDFGenerator) createBasicPDF(orientation string) (*gopdf.GoPdf, error) 
 
 	pdf.AddPage()
 
-	// Attempt to load fonts
 	err := g.loadFonts(pdf)
 	if err != nil {
 		log.Printf("Warning: Could not load fonts: %v - PDF will use default font", err)
@@ -173,9 +159,8 @@ func (g *PDFGenerator) createBasicPDF(orientation string) (*gopdf.GoPdf, error) 
 	return pdf, nil
 }
 
-// GeneratePriceReportPDF generates a price report in PDF format
 func (g *PDFGenerator) GeneratePriceReportPDF(ctx context.Context, startDate, endDate time.Time, minChangePercent float64) (string, string, error) {
-	// Get all products
+
 	products, err := db.GetAllProducts(ctx, g.db)
 	if err != nil {
 		return "", "", fmt.Errorf("error getting products: %w", err)
@@ -185,13 +170,11 @@ func (g *PDFGenerator) GeneratePriceReportPDF(ctx context.Context, startDate, en
 		return "", "", fmt.Errorf("no products found")
 	}
 
-	// Create new PDF document (landscape format for wider tables)
 	pdf, err := g.createBasicPDF("landscape")
 	if err != nil {
 		return "", "", fmt.Errorf("error creating PDF: %w", err)
 	}
 
-	// Add report title
 	if g.defaultBold != fallbackFont {
 		pdf.SetFont(g.defaultBold, "", 16)
 	}
@@ -203,22 +186,19 @@ func (g *PDFGenerator) GeneratePriceReportPDF(ctx context.Context, startDate, en
 	pdf.Cell(nil, title)
 	pdf.Br(20)
 
-	// Define table headers - русифицированы
 	headers := []string{
 		"Товар", "Артикул", "Начальная цена (коп.)", "Конечная цена (коп.)",
 		"Изменение (коп.)", "Изменение (%)", "Мин. цена (коп.)", "Макс. цена (коп.)", "Записей",
 	}
 
-	// Configure table layout
 	colWidths := []float64{120, 60, 70, 70, 70, 50, 70, 70, 50}
 	headerHeight := 30.0
 	rowHeight := 25.0
 
-	// Draw table header
 	if g.defaultBold != fallbackFont {
 		pdf.SetFont(g.defaultBold, "", 10)
 	}
-	pdf.SetFillColor(221, 235, 247) // Light blue background
+	pdf.SetFillColor(221, 235, 247)
 	x := 30.0
 	y := pdf.GetY()
 
@@ -230,17 +210,15 @@ func (g *PDFGenerator) GeneratePriceReportPDF(ctx context.Context, startDate, en
 		x += colWidths[i]
 	}
 
-	// Prepare for table data
 	y += headerHeight
 	if g.defaultFont != fallbackFont {
 		pdf.SetFont(g.defaultFont, "", 9)
 	}
 
-	// Process each product
 	productsWithSignificantChanges := 0
 
 	for _, product := range products {
-		// Get price history for this product
+
 		prices, err := db.GetPricesForPeriod(ctx, g.db, product.ID, startDate, endDate)
 		if err != nil {
 			log.Printf("Error getting prices for product %d: %v", product.ID, err)
@@ -248,15 +226,13 @@ func (g *PDFGenerator) GeneratePriceReportPDF(ctx context.Context, startDate, en
 		}
 
 		if len(prices) < 2 {
-			continue // Need at least two price points to show changes
+			continue
 		}
 
-		// Calculate price metrics
 		firstPrice := prices[0].FinalPrice
 		lastPrice := prices[len(prices)-1].FinalPrice
 		priceChange := lastPrice - firstPrice
 
-		// Skip products with minimal price changes if threshold specified
 		priceChangePercent := 0.0
 		if firstPrice > 0 {
 			priceChangePercent = float64(priceChange) / float64(firstPrice) * 100
@@ -268,7 +244,6 @@ func (g *PDFGenerator) GeneratePriceReportPDF(ctx context.Context, startDate, en
 
 		productsWithSignificantChanges++
 
-		// Find minimum and maximum prices
 		minPrice, maxPrice := firstPrice, firstPrice
 		for _, price := range prices {
 			if price.FinalPrice < minPrice {
@@ -279,12 +254,10 @@ func (g *PDFGenerator) GeneratePriceReportPDF(ctx context.Context, startDate, en
 			}
 		}
 
-		// Check if we need a new page
-		if y > 500 { // Near the bottom of the page
+		if y > 500 {
 			pdf.AddPage()
 			y = 30
 
-			// Redraw column headers on new page
 			if g.defaultBold != fallbackFont {
 				pdf.SetFont(g.defaultBold, "", 10)
 			}
@@ -305,10 +278,8 @@ func (g *PDFGenerator) GeneratePriceReportPDF(ctx context.Context, startDate, en
 			}
 		}
 
-		// Draw row for this product
 		x = 30.0
 
-		// Product name (truncate if too long)
 		pdf.Rectangle(x, y, x+colWidths[0], y+rowHeight, "D", 0, 0)
 		pdf.SetX(x + 2)
 		pdf.SetY(y + 8)
@@ -319,56 +290,48 @@ func (g *PDFGenerator) GeneratePriceReportPDF(ctx context.Context, startDate, en
 		pdf.Cell(nil, name)
 		x += colWidths[0]
 
-		// Vendor code
 		pdf.Rectangle(x, y, x+colWidths[1], y+rowHeight, "D", 0, 0)
 		pdf.SetX(x + 2)
 		pdf.SetY(y + 8)
 		pdf.Cell(nil, product.VendorCode)
 		x += colWidths[1]
 
-		// Initial price (в копейках, без деления на 100)
 		pdf.Rectangle(x, y, x+colWidths[2], y+rowHeight, "D", 0, 0)
 		pdf.SetX(x + 2)
 		pdf.SetY(y + 8)
 		pdf.Cell(nil, fmt.Sprintf("%d", firstPrice))
 		x += colWidths[2]
 
-		// Final price (в копейках, без деления на 100)
 		pdf.Rectangle(x, y, x+colWidths[3], y+rowHeight, "D", 0, 0)
 		pdf.SetX(x + 2)
 		pdf.SetY(y + 8)
 		pdf.Cell(nil, fmt.Sprintf("%d", lastPrice))
 		x += colWidths[3]
 
-		// Price change (в копейках, без деления на 100)
 		pdf.Rectangle(x, y, x+colWidths[4], y+rowHeight, "D", 0, 0)
 		pdf.SetX(x + 2)
 		pdf.SetY(y + 8)
 		pdf.Cell(nil, fmt.Sprintf("%d", priceChange))
 		x += colWidths[4]
 
-		// Percentage change
 		pdf.Rectangle(x, y, x+colWidths[5], y+rowHeight, "D", 0, 0)
 		pdf.SetX(x + 2)
 		pdf.SetY(y + 8)
 		pdf.Cell(nil, fmt.Sprintf("%.2f%%", priceChangePercent))
 		x += colWidths[5]
 
-		// Min price (в копейках, без деления на 100)
 		pdf.Rectangle(x, y, x+colWidths[6], y+rowHeight, "D", 0, 0)
 		pdf.SetX(x + 2)
 		pdf.SetY(y + 8)
 		pdf.Cell(nil, fmt.Sprintf("%d", minPrice))
 		x += colWidths[6]
 
-		// Max price (в копейках, без деления на 100)
 		pdf.Rectangle(x, y, x+colWidths[7], y+rowHeight, "D", 0, 0)
 		pdf.SetX(x + 2)
 		pdf.SetY(y + 8)
 		pdf.Cell(nil, fmt.Sprintf("%d", maxPrice))
 		x += colWidths[7]
 
-		// Record count
 		pdf.Rectangle(x, y, x+colWidths[8], y+rowHeight, "D", 0, 0)
 		pdf.SetX(x + 2)
 		pdf.SetY(y + 8)
@@ -377,7 +340,6 @@ func (g *PDFGenerator) GeneratePriceReportPDF(ctx context.Context, startDate, en
 		y += rowHeight
 	}
 
-	// If no products had significant changes, add a message
 	if productsWithSignificantChanges == 0 {
 		if g.defaultFont != fallbackFont {
 			pdf.SetFont(g.defaultFont, "", 12)
@@ -387,7 +349,6 @@ func (g *PDFGenerator) GeneratePriceReportPDF(ctx context.Context, startDate, en
 		pdf.Cell(nil, fmt.Sprintf("Не найдено товаров с изменением цены более %.1f%%", minChangePercent))
 	}
 
-	// Save the PDF to a temporary file
 	filename := fmt.Sprintf("отчет_о_ценах_%s_%s.pdf",
 		startDate.Format("02-01-2006"),
 		endDate.Format("02-01-2006"))
@@ -400,15 +361,13 @@ func (g *PDFGenerator) GeneratePriceReportPDF(ctx context.Context, startDate, en
 	return filePath, filename, nil
 }
 
-// GenerateStockReportPDF generates a stock report in PDF format
 func (g *PDFGenerator) GenerateStockReportPDF(ctx context.Context, startDate, endDate time.Time, minChangePercent float64) (string, string, error) {
-	// Get all products
+
 	products, err := db.GetAllProducts(ctx, g.db)
 	if err != nil {
 		return "", "", fmt.Errorf("error getting products: %w", err)
 	}
 
-	// Get all warehouses
 	warehouses, err := db.GetAllWarehouses(ctx, g.db)
 	if err != nil {
 		return "", "", fmt.Errorf("error getting warehouses: %w", err)
@@ -418,13 +377,11 @@ func (g *PDFGenerator) GenerateStockReportPDF(ctx context.Context, startDate, en
 		return "", "", fmt.Errorf("no products found")
 	}
 
-	// Create new PDF document (landscape format for wider tables)
 	pdf, err := g.createBasicPDF("landscape")
 	if err != nil {
 		return "", "", fmt.Errorf("error creating PDF: %w", err)
 	}
 
-	// Add report title
 	if g.defaultBold != fallbackFont {
 		pdf.SetFont(g.defaultBold, "", 16)
 	}
@@ -436,11 +393,8 @@ func (g *PDFGenerator) GenerateStockReportPDF(ctx context.Context, startDate, en
 	pdf.Cell(nil, title)
 	pdf.Br(20)
 
-	// Define table headers
 	headers := []string{"Товар", "Артикул"}
 
-	// Add warehouse names as headers
-	// Limit number of warehouses to display to prevent too wide table
 	maxWarehousesToDisplay := 5
 	displayedWarehouses := warehouses
 	if len(warehouses) > maxWarehousesToDisplay {
@@ -458,21 +412,19 @@ func (g *PDFGenerator) GenerateStockReportPDF(ctx context.Context, startDate, en
 
 	headers = append(headers, "Всего", "Изменение")
 
-	// Configure table layout
 	colWidths := []float64{120, 60}
 	for range displayedWarehouses {
 		colWidths = append(colWidths, 40)
 	}
-	colWidths = append(colWidths, 50, 50) // Total and Change columns
+	colWidths = append(colWidths, 50, 50)
 
 	headerHeight := 30.0
 	rowHeight := 25.0
 
-	// Draw table header
 	if g.defaultBold != fallbackFont {
 		pdf.SetFont(g.defaultBold, "", 10)
 	}
-	pdf.SetFillColor(221, 235, 247) // Light blue background
+	pdf.SetFillColor(221, 235, 247)
 	x := 30.0
 	y := pdf.GetY()
 
@@ -484,17 +436,15 @@ func (g *PDFGenerator) GenerateStockReportPDF(ctx context.Context, startDate, en
 		x += colWidths[i]
 	}
 
-	// Prepare for table data
 	y += headerHeight
 	if g.defaultFont != fallbackFont {
 		pdf.SetFont(g.defaultFont, "", 9)
 	}
 
-	// Process each product
 	productsWithSignificantChanges := 0
 
 	for _, product := range products {
-		// Collect stock data for all warehouses
+
 		warehouseStocks := make(map[int64][]models.StockRecord)
 		totalInitialStock := 0
 		totalFinalStock := 0
@@ -517,30 +467,26 @@ func (g *PDFGenerator) GenerateStockReportPDF(ctx context.Context, startDate, en
 		}
 
 		if !hasStockData {
-			continue // Skip if no stock data for any warehouse
+			continue
 		}
 
-		// Calculate total change percentage
 		totalChangePercent := 0.0
 		if totalInitialStock > 0 {
 			totalChangePercent = float64(totalFinalStock-totalInitialStock) / float64(totalInitialStock) * 100
 		} else if totalFinalStock > 0 {
-			totalChangePercent = 100.0 // If starting from zero, that's a 100% increase
+			totalChangePercent = 100.0
 		}
 
-		// Skip products with minimal stock changes if threshold specified
 		if math.Abs(totalChangePercent) < minChangePercent {
 			continue
 		}
 
 		productsWithSignificantChanges++
 
-		// Check if we need a new page
-		if y > 500 { // Near the bottom of the page
+		if y > 500 {
 			pdf.AddPage()
 			y = 30
 
-			// Redraw column headers on new page
 			if g.defaultBold != fallbackFont {
 				pdf.SetFont(g.defaultBold, "", 10)
 			}
@@ -561,10 +507,8 @@ func (g *PDFGenerator) GenerateStockReportPDF(ctx context.Context, startDate, en
 			}
 		}
 
-		// Draw row for this product
 		x = 30.0
 
-		// Product name (truncate if too long)
 		pdf.Rectangle(x, y, x+colWidths[0], y+rowHeight, "D", 0, 0)
 		pdf.SetX(x + 2)
 		pdf.SetY(y + 8)
@@ -575,14 +519,12 @@ func (g *PDFGenerator) GenerateStockReportPDF(ctx context.Context, startDate, en
 		pdf.Cell(nil, name)
 		x += colWidths[0]
 
-		// Vendor code
 		pdf.Rectangle(x, y, x+colWidths[1], y+rowHeight, "D", 0, 0)
 		pdf.SetX(x + 2)
 		pdf.SetY(y + 8)
 		pdf.Cell(nil, product.VendorCode)
 		x += colWidths[1]
 
-		// Stock for each warehouse
 		for i, warehouse := range displayedWarehouses {
 			pdf.Rectangle(x, y, x+colWidths[2+i], y+rowHeight, "D", 0, 0)
 			pdf.SetX(x + 2)
@@ -598,14 +540,12 @@ func (g *PDFGenerator) GenerateStockReportPDF(ctx context.Context, startDate, en
 			x += colWidths[2+i]
 		}
 
-		// Total stock
 		pdf.Rectangle(x, y, x+colWidths[len(colWidths)-2], y+rowHeight, "D", 0, 0)
 		pdf.SetX(x + 2)
 		pdf.SetY(y + 8)
 		pdf.Cell(nil, fmt.Sprintf("%d", totalFinalStock))
 		x += colWidths[len(colWidths)-2]
 
-		// Total change
 		pdf.Rectangle(x, y, x+colWidths[len(colWidths)-1], y+rowHeight, "D", 0, 0)
 		pdf.SetX(x + 2)
 		pdf.SetY(y + 8)
@@ -614,7 +554,6 @@ func (g *PDFGenerator) GenerateStockReportPDF(ctx context.Context, startDate, en
 		y += rowHeight
 	}
 
-	// If no products had significant changes, add a message
 	if productsWithSignificantChanges == 0 {
 		if g.defaultFont != fallbackFont {
 			pdf.SetFont(g.defaultFont, "", 12)
@@ -624,9 +563,8 @@ func (g *PDFGenerator) GenerateStockReportPDF(ctx context.Context, startDate, en
 		pdf.Cell(nil, fmt.Sprintf("No products found with stock changes greater than %.1f%%", minChangePercent))
 	}
 
-	// Add stock trend charts for products with significant changes
 	if productsWithSignificantChanges > 0 {
-		// Create a second page for trends
+
 		pdf.AddPage()
 		if g.defaultBold != fallbackFont {
 			pdf.SetFont(g.defaultBold, "", 14)
@@ -636,7 +574,6 @@ func (g *PDFGenerator) GenerateStockReportPDF(ctx context.Context, startDate, en
 		pdf.Cell(nil, "Stock Trend Analysis")
 		pdf.Br(20)
 
-		// Add trend charts for top products (most significant changes)
 		type ProductWithChange struct {
 			Product       models.ProductRecord
 			InitialStock  int
@@ -647,7 +584,6 @@ func (g *PDFGenerator) GenerateStockReportPDF(ctx context.Context, startDate, en
 
 		var productsToChart []ProductWithChange
 
-		// Collect data for products with significant changes
 		for _, product := range products {
 			warehouseStocks := make(map[int64][]models.StockRecord)
 			totalInitialStock := 0
@@ -692,12 +628,10 @@ func (g *PDFGenerator) GenerateStockReportPDF(ctx context.Context, startDate, en
 			})
 		}
 
-		// Sort products by absolute change percentage (descending)
 		sort.Slice(productsToChart, func(i, j int) bool {
 			return productsToChart[i].AbsChangePerc > productsToChart[j].AbsChangePerc
 		})
 
-		// Add trend charts for top products (limit to 5)
 		maxChartsToShow := 5
 		if len(productsToChart) > maxChartsToShow {
 			productsToChart = productsToChart[:maxChartsToShow]
@@ -708,7 +642,7 @@ func (g *PDFGenerator) GenerateStockReportPDF(ctx context.Context, startDate, en
 		chartGap := 20.0
 
 		for _, productData := range productsToChart {
-			// Check if we need a new page
+
 			if chartY > 650 {
 				pdf.AddPage()
 				if g.defaultBold != fallbackFont {
@@ -720,14 +654,12 @@ func (g *PDFGenerator) GenerateStockReportPDF(ctx context.Context, startDate, en
 				chartY = 50
 			}
 
-			// Add product name and basic info
 			if g.defaultBold != fallbackFont {
 				pdf.SetFont(g.defaultBold, "", 12)
 			}
 			pdf.SetX(30)
 			pdf.SetY(chartY)
 
-			// Calculate overall change
 			changePerc := 0.0
 			if productData.InitialStock > 0 {
 				changePerc = float64(productData.FinalStock-productData.InitialStock) / float64(productData.InitialStock) * 100
@@ -743,7 +675,6 @@ func (g *PDFGenerator) GenerateStockReportPDF(ctx context.Context, startDate, en
 
 			chartY += 20
 
-			// Prepare data for chart
 			type DayData struct {
 				Date  time.Time
 				Stock int
@@ -751,7 +682,6 @@ func (g *PDFGenerator) GenerateStockReportPDF(ctx context.Context, startDate, en
 
 			var dailyTotals []DayData
 
-			// Aggregate data by day
 			dailyMap := make(map[string]int)
 			dateFormat := "2006-01-02"
 
@@ -762,26 +692,22 @@ func (g *PDFGenerator) GenerateStockReportPDF(ctx context.Context, startDate, en
 				}
 			}
 
-			// Convert to sorted daily data
 			for dateStr, total := range dailyMap {
 				date, _ := time.Parse(dateFormat, dateStr)
 				dailyTotals = append(dailyTotals, DayData{Date: date, Stock: total})
 			}
 
-			// Sort by date
 			sort.Slice(dailyTotals, func(i, j int) bool {
 				return dailyTotals[i].Date.Before(dailyTotals[j].Date)
 			})
 
-			// Draw a simplified time series chart
 			if len(dailyTotals) > 1 {
-				// Chart dimensions
+
 				chartWidth := 700.0
 				marginLeft := 50.0
 				marginBottom := 30.0
-				chartY += 10 // Space before chart
+				chartY += 10
 
-				// Calculate minimum and maximum values for Y-axis
 				minStock, maxStock := dailyTotals[0].Stock, dailyTotals[0].Stock
 				for _, data := range dailyTotals {
 					if data.Stock < minStock {
@@ -792,7 +718,6 @@ func (g *PDFGenerator) GenerateStockReportPDF(ctx context.Context, startDate, en
 					}
 				}
 
-				// Add padding to minimum/maximum for better visualization
 				yPadding := int(float64(maxStock-minStock) * 0.1)
 				if yPadding < 1 {
 					yPadding = 1
@@ -800,17 +725,13 @@ func (g *PDFGenerator) GenerateStockReportPDF(ctx context.Context, startDate, en
 				minStock = maximum(0, minStock-yPadding)
 				maxStock += yPadding
 
-				// Draw axes
 				pdf.SetStrokeColor(0, 0, 0)
 
-				// X-axis
 				pdf.Line(30+marginLeft, chartY+chartHeight-marginBottom,
 					30+marginLeft+chartWidth-marginLeft, chartY+chartHeight-marginBottom)
 
-				// Y-axis
 				pdf.Line(30+marginLeft, chartY, 30+marginLeft, chartY+chartHeight-marginBottom)
 
-				// Add Y-axis labels
 				if g.defaultFont != fallbackFont {
 					pdf.SetFont(g.defaultFont, "", 8)
 				}
@@ -825,13 +746,11 @@ func (g *PDFGenerator) GenerateStockReportPDF(ctx context.Context, startDate, en
 					pdf.SetY(yPos - 3)
 					pdf.Cell(nil, fmt.Sprintf("%d", yValue))
 
-					// Optional: Add horizontal grid lines
-					pdf.SetStrokeColor(200, 200, 200) // Light gray
+					pdf.SetStrokeColor(200, 200, 200)
 					pdf.Line(30+marginLeft, yPos, 30+marginLeft+chartWidth-marginLeft, yPos)
-					pdf.SetStrokeColor(0, 0, 0) // Reset to black
+					pdf.SetStrokeColor(0, 0, 0)
 				}
 
-				// Add X-axis date labels
 				numXTicks := minimum(len(dailyTotals), 6)
 				for i := 0; i < numXTicks; i++ {
 					idx := i
@@ -845,8 +764,7 @@ func (g *PDFGenerator) GenerateStockReportPDF(ctx context.Context, startDate, en
 					pdf.Cell(nil, dailyTotals[idx].Date.Format("02.01"))
 				}
 
-				// Draw the line chart
-				pdf.SetStrokeColor(0, 0, 255) // Blue for the line
+				pdf.SetStrokeColor(0, 0, 255)
 				pdf.SetLineWidth(2)
 
 				for i := 0; i < len(dailyTotals)-1; i++ {
@@ -863,9 +781,9 @@ func (g *PDFGenerator) GenerateStockReportPDF(ctx context.Context, startDate, en
 					pdf.Line(x1, y1, x2, y2)
 				}
 
-				pdf.SetLineWidth(1) // Reset line width
+				pdf.SetLineWidth(1)
 			} else {
-				// Not enough data points for a chart
+
 				if g.defaultFont != fallbackFont {
 					pdf.SetFont(g.defaultFont, "", 10)
 				}
@@ -891,7 +809,6 @@ func (g *PDFGenerator) GenerateStockReportPDF(ctx context.Context, startDate, en
 	return filePath, filename, nil
 }
 
-// Helper function for determining minimum value
 func minimum(a, b int) int {
 	if a < b {
 		return a
@@ -899,7 +816,6 @@ func minimum(a, b int) int {
 	return b
 }
 
-// Helper function for determining maximum value
 func maximum(a, b int) int {
 	if a > b {
 		return a

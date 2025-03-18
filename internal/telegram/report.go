@@ -21,7 +21,6 @@ import (
 	"wbmonitoring/monitoring/internal/telegram/report"
 )
 
-// addDynamicChangesSheet добавляет лист с динамикой изменений во времени для товаров
 // с изменениями больше порогового значения
 func addDynamicChangesSheet(
 	f *excelize.File,
@@ -532,14 +531,13 @@ func (b *Bot) sendReportMenu(chatID int64) {
 
 // Обновляем метод генерации и отправки отчетов с использованием новых сервисов
 func (b *Bot) generateReport(chatID int64, reportType, period, format string) {
-	// Send a progress message
+
 	progressMsg := tgbotapi.NewMessage(chatID, "Генерация отчета... Пожалуйста, подождите.")
 	sentMsg, err := b.api.Send(progressMsg)
 	if err == nil {
 		b.trackReportMessage(chatID, sentMsg.MessageID)
 	}
 
-	// Generate the report
 	filePath, reportName, err := b.generateReportFile(reportType, period, format)
 	if err != nil {
 		log.Printf("Ошибка при генерации отчета: %v", err)
@@ -548,7 +546,6 @@ func (b *Bot) generateReport(chatID int64, reportType, period, format string) {
 		return
 	}
 
-	// Prepare the report file for sending
 	fileBytes, err := os.ReadFile(filePath)
 	if err != nil {
 		log.Printf("Ошибка при чтении файла отчета: %v", err)
@@ -557,10 +554,8 @@ func (b *Bot) generateReport(chatID int64, reportType, period, format string) {
 		return
 	}
 
-	// Clean up all previous messages before sending the report
 	b.cleanupReportMessages(chatID)
 
-	// Determine the report type name for the caption
 	var reportTypeName string
 	if reportType == "prices" {
 		reportTypeName = "ценам"
@@ -568,21 +563,17 @@ func (b *Bot) generateReport(chatID int64, reportType, period, format string) {
 		reportTypeName = "остаткам"
 	}
 
-	// Create the document message
 	doc := tgbotapi.NewDocument(chatID, tgbotapi.FileBytes{
 		Name:  reportName,
 		Bytes: fileBytes,
 	})
 	doc.Caption = fmt.Sprintf("Отчет по %s за %s", reportTypeName, b.getPeriodName(period))
 
-	// Send the document
 	b.api.Send(doc)
 
-	// Delete the temporary file
 	os.Remove(filePath)
 }
 
-// generatePriceReport генерирует отчет по ценам в текстовом формате
 func (b *Bot) generatePriceReport(chatID int64, startDate, endDate time.Time) {
 	ctx := context.Background()
 
@@ -649,7 +640,7 @@ func (b *Bot) generatePriceReport(chatID int64, startDate, endDate time.Time) {
 
 	// Отправляем отчет
 	if len(reportText) > 4096 {
-		// Telegram имеет ограничение в 4096 символов на сообщение
+
 		// Разбиваем длинный отчет на части
 		for i := 0; i < len(reportText); i += 4000 {
 			end := i + 4000
@@ -663,7 +654,6 @@ func (b *Bot) generatePriceReport(chatID int64, startDate, endDate time.Time) {
 	}
 }
 
-// generatePriceReportExcel генерирует отчет по ценам в формате Excel
 func (b *Bot) generatePriceReportExcel(chatID int64, startDate, endDate time.Time, config report.ReportConfig) {
 	ctx := context.Background()
 
@@ -914,7 +904,6 @@ func (b *Bot) generatePriceReportExcel(chatID int64, startDate, endDate time.Tim
 	os.Remove(filepath)
 }
 
-// generateStockReport генерирует отчет по остаткам в текстовом формате
 func (b *Bot) generateStockReport(chatID int64, startDate, endDate time.Time) {
 	ctx := context.Background()
 
@@ -1020,7 +1009,6 @@ func (b *Bot) generateStockReport(chatID int64, startDate, endDate time.Time) {
 	}
 }
 
-// generateStockReportExcel генерирует отчет по остаткам в формате Excel
 func (b *Bot) generateStockReportExcel(chatID int64, startDate, endDate time.Time, config report.ReportConfig) {
 	ctx := context.Background()
 
@@ -1286,7 +1274,6 @@ func (b *Bot) generateStockReportExcel(chatID int64, startDate, endDate time.Tim
 	os.Remove(filepath)
 }
 
-// generateStockReportPDFToFile генерирует отчет по остаткам в PDF и сохраняет его в файл
 func (b *Bot) generateStockReportPDFToFile(startDate, endDate time.Time, config report.ReportConfig) (string, string, error) {
 	ctx := context.Background()
 
@@ -1567,8 +1554,8 @@ func (b *Bot) generateStockReportPDFToFile(startDate, endDate time.Time, config 
 
 			// Оси
 			pdf.SetStrokeColor(0, 0, 0)
-			pdf.Line(30+marginLeft, y+yAxisLength, 30+marginLeft+xAxisLength, y+yAxisLength) // X-ось
-			pdf.Line(30+marginLeft, y, 30+marginLeft, y+yAxisLength)                         // Y-ось
+			pdf.Line(30+marginLeft, y+yAxisLength, 30+marginLeft+xAxisLength, y+yAxisLength)
+			pdf.Line(30+marginLeft, y, 30+marginLeft, y+yAxisLength)
 
 			// Метки на оси Y
 			pdf.SetFont("arial", "", 8)
@@ -1643,10 +1630,9 @@ func (b *Bot) generateDailyPriceReport(ctx context.Context, startDate, endDate t
 
 	// Используем старый метод, если новый генератор недоступен
 	return fmt.Errorf("error")
-	//return b.generateDailyPriceReportLegacy(ctx, startDate, endDate)
+
 }
 
-// generateDailyStockReport генерирует и отправляет ежедневный отчет по остаткам
 func (b *Bot) generateDailyStockReport(ctx context.Context, startDate, endDate time.Time) error {
 	// Получаем все товары
 	products, err := db.GetAllProducts(ctx, b.db)
@@ -1792,7 +1778,6 @@ func (b *Bot) generateDailyStockReport(ctx context.Context, startDate, endDate t
 	return nil
 }
 
-// generatePriceReportExcelToFile генерирует отчет по ценам в формате Excel и сохраняет его во временный файл.
 // Возвращает путь к файлу, имя отчета и ошибку (если возникнет).
 func (b *Bot) generatePriceReportExcelToFile(startDate, endDate time.Time, config report.ReportConfig) (string, string, error) {
 	ctx := context.Background()
@@ -2304,7 +2289,6 @@ func (b *Bot) generatePriceReportPDFToFile(startDate, endDate time.Time, config 
 	return filePath, filename, nil
 }
 
-// generatePriceReportPDF генерирует отчет по ценам в формате PDF
 func (b *Bot) generatePriceReportPDF(chatID int64, startDate, endDate time.Time, config report.ReportConfig) {
 	ctx := context.Background()
 
@@ -2498,7 +2482,7 @@ func (b *Bot) generatePriceReportPDF(chatID int64, startDate, endDate time.Time,
 
 	// Добавляем информацию о динамических изменениях если нужно
 	// Для PDF это может быть отдельная страница или секция
-	//if config.ShowDynamicChanges {}
+
 	pdf.AddPage()
 	pdf.SetFont("arial-bold", "", 14)
 	pdf.Cell(nil, "Динамика изменения цен")
@@ -2622,7 +2606,6 @@ func (b *Bot) generatePriceReportPDF(chatID int64, startDate, endDate time.Time,
 	os.Remove(filepath)
 }
 
-// generateStockReportPDF генерирует отчет по складским запасам в формате PDF
 func (b *Bot) generateStockReportPDF(chatID int64, startDate, endDate time.Time, config report.ReportConfig) {
 	ctx := context.Background()
 
@@ -3042,12 +3025,9 @@ func (b *Bot) generateStockReportPDF(chatID int64, startDate, endDate time.Time,
 				}
 
 				// Рисуем точки на графике
-				//for i := 0; i < len(tsData.TotalData); i++ {
-				//	x := 30 + marginLeft + (float64(i) * xAxisLength / float64(len(tsData.TotalData)-1))
-				//	y1 := y + yAxisLength - ((float64(tsData.TotalData[i].Quantity) - float64(minQty)) * yAxisLength / float64(maxQty-minQty))
+
 				//
-				//	pdf.SetFillColor(0, 0, 255) // Синий цвет для точек
-				//	pdf.Circle(x, y1, 3, "F")
+
 				//}
 
 				pdf.SetLineWidth(1) // Возвращаем стандартную толщину линии
@@ -3232,12 +3212,9 @@ func (b *Bot) generateStockReportPDF(chatID int64, startDate, endDate time.Time,
 					}
 
 					// Рисуем точки на графике
-					//for i := 0; i < len(timeData); i++ {
-					//	xPoint := x + marginLeft + (float64(i) * xAxisLength / float64(len(timeData)-1))
-					//	yPoint := y + yAxisLength - ((float64(timeData[i].Quantity) - float64(minQty)) * yAxisLength / float64(maxQty-minQty))
+
 					//
-					//	pdf.SetFillColor(0, 0, 255) // Синий цвет для точек
-					//	pdf.Circle(xPoint, yPoint, 2, "F")
+
 					//}
 
 					// Переходим к следующему графику

@@ -12,7 +12,6 @@ import (
 	"github.com/jmoiron/sqlx"
 )
 
-// HourlyDataKeeper is responsible for taking and storing hourly snapshots of prices and stocks
 type HourlyDataKeeper struct {
 	db                *sqlx.DB
 	snapshotInterval  time.Duration
@@ -21,7 +20,6 @@ type HourlyDataKeeper struct {
 	workerPoolSize    int
 }
 
-// NewHourlyDataKeeper creates a new HourlyDataKeeper service
 func NewHourlyDataKeeper(
 	database *sqlx.DB,
 	snapshotInterval time.Duration,
@@ -29,7 +27,7 @@ func NewHourlyDataKeeper(
 	workerPoolSize int,
 ) *HourlyDataKeeper {
 	if workerPoolSize <= 0 {
-		workerPoolSize = 5 // Default worker pool size
+		workerPoolSize = 5
 	}
 
 	return &HourlyDataKeeper{
@@ -40,33 +38,29 @@ func NewHourlyDataKeeper(
 	}
 }
 
-// RunHourlySnapshots starts the hourly snapshot process
 func (h *HourlyDataKeeper) RunHourlySnapshots(ctx context.Context) error {
-	// Calculate time until next full hour
+
 	now := time.Now()
 	nextHour := time.Date(now.Year(), now.Month(), now.Day(), now.Hour()+1, 0, 0, 0, now.Location())
 	initialDelay := nextHour.Sub(now)
 
 	log.Printf("Hourly snapshots scheduled to start at %s (in %s)", nextHour.Format("15:04:05"), initialDelay)
 
-	// Wait until the next full hour to start
 	timer := time.NewTimer(initialDelay)
 	defer timer.Stop()
 
 	for {
 		select {
 		case <-timer.C:
-			// Take snapshots
+
 			if err := h.TakeSnapshots(ctx); err != nil {
 				log.Printf("Error taking hourly snapshots: %v", err)
 			}
 
-			// Clean up old snapshots
 			if err := h.CleanupOldSnapshots(ctx); err != nil {
 				log.Printf("Error cleaning up old snapshots: %v", err)
 			}
 
-			// Reset timer for next snapshot (typically 1 hour)
 			timer.Reset(h.snapshotInterval)
 		case <-ctx.Done():
 			return ctx.Err()
@@ -74,15 +68,12 @@ func (h *HourlyDataKeeper) RunHourlySnapshots(ctx context.Context) error {
 	}
 }
 
-// TakeSnapshots takes hourly snapshots of prices and stocks
 func (h *HourlyDataKeeper) TakeSnapshots(ctx context.Context) error {
 	log.Println("Taking hourly data snapshots")
 
-	// Record the snapshot time
 	snapshotTime := time.Now()
 	h.lastSnapshotTaken = snapshotTime
 
-	// Get all products and warehouses concurrently
 	var wg sync.WaitGroup
 	var productsMu, warehousesMu sync.Mutex
 	var products []models.ProductRecord
@@ -91,7 +82,6 @@ func (h *HourlyDataKeeper) TakeSnapshots(ctx context.Context) error {
 
 	wg.Add(2)
 
-	// Fetch products asynchronously
 	go func() {
 		defer wg.Done()
 		prods, err := db.GetAllProducts(ctx, h.db)
@@ -101,7 +91,6 @@ func (h *HourlyDataKeeper) TakeSnapshots(ctx context.Context) error {
 		productsMu.Unlock()
 	}()
 
-	// Fetch warehouses asynchronously
 	go func() {
 		defer wg.Done()
 		whs, err := db.GetAllWarehouses(ctx, h.db)
@@ -123,12 +112,10 @@ func (h *HourlyDataKeeper) TakeSnapshots(ctx context.Context) error {
 
 	log.Printf("Taking snapshots for %d products across %d warehouses", len(products), len(warehouses))
 
-	// Take price snapshots in parallel
 	if err := h.takePriceSnapshots(ctx, products, snapshotTime); err != nil {
 		log.Printf("Error taking price snapshots: %v", err)
 	}
 
-	// Take stock snapshots in parallel
 	if err := h.takeStockSnapshots(ctx, products, warehouses, snapshotTime); err != nil {
 		log.Printf("Error taking stock snapshots: %v", err)
 	}
@@ -137,7 +124,6 @@ func (h *HourlyDataKeeper) TakeSnapshots(ctx context.Context) error {
 	return nil
 }
 
-// takePriceSnapshots takes snapshots of the current prices for all products in parallel
 func (h *HourlyDataKeeper) takePriceSnapshots(ctx context.Context, products []models.ProductRecord, snapshotTime time.Time) error {
 	if len(products) == 0 {
 		return nil
@@ -145,18 +131,15 @@ func (h *HourlyDataKeeper) takePriceSnapshots(ctx context.Context, products []mo
 
 	log.Printf("Taking price snapshots for %d products", len(products))
 
-	// Create worker pool for parallelization
 	productCh := make(chan models.ProductRecord, len(products))
 	errCh := make(chan error, len(products))
 	var wg sync.WaitGroup
 
-	// Limit concurrency to avoid overwhelming the database
 	workers := h.workerPoolSize
 	if workers > len(products) {
 		workers = len(products)
 	}
 
-	// Start worker goroutines
 	for i := 0; i < workers; i++ {
 		wg.Add(1)
 		go func() {
@@ -169,17 +152,14 @@ func (h *HourlyDataKeeper) takePriceSnapshots(ctx context.Context, products []mo
 		}()
 	}
 
-	// Send products to workers
 	for _, product := range products {
 		productCh <- product
 	}
 	close(productCh)
 
-	// Wait for all workers to finish
 	wg.Wait()
 	close(errCh)
 
-	// Collect errors
 	var errs []error
 	for err := range errCh {
 		errs = append(errs, err)
@@ -192,20 +172,17 @@ func (h *HourlyDataKeeper) takePriceSnapshots(ctx context.Context, products []mo
 	return nil
 }
 
-// processPriceSnapshot processes a price snapshot for a single product
 func (h *HourlyDataKeeper) processPriceSnapshot(ctx context.Context, product models.ProductRecord, snapshotTime time.Time) error {
-	// Get latest price record for this product
+
 	price, err := db.GetLastPrice(ctx, h.db, product.ID)
 	if err != nil {
 		return fmt.Errorf("getting last price for product %d: %w", product.ID, err)
 	}
 
-	// Skip if no price data available
 	if price == nil {
 		return nil
 	}
 
-	// Create snapshot record
 	priceSnapshot := &models.PriceSnapshot{
 		ProductID:         price.ProductID,
 		SizeID:            price.SizeID,
@@ -220,7 +197,6 @@ func (h *HourlyDataKeeper) processPriceSnapshot(ctx context.Context, product mod
 		SnapshotTime:      snapshotTime,
 	}
 
-	// Save snapshot
 	if err := h.savePriceSnapshot(ctx, priceSnapshot); err != nil {
 		return fmt.Errorf("saving price snapshot for product %d: %w", product.ID, err)
 	}
@@ -228,7 +204,6 @@ func (h *HourlyDataKeeper) processPriceSnapshot(ctx context.Context, product mod
 	return nil
 }
 
-// takeStockSnapshots takes snapshots of the current stock for all products and warehouses
 func (h *HourlyDataKeeper) takeStockSnapshots(ctx context.Context, products []models.ProductRecord, warehouses []models.Warehouse, snapshotTime time.Time) error {
 	if len(products) == 0 || len(warehouses) == 0 {
 		return nil
@@ -236,25 +211,21 @@ func (h *HourlyDataKeeper) takeStockSnapshots(ctx context.Context, products []mo
 
 	log.Printf("Taking stock snapshots for %d products across %d warehouses", len(products), len(warehouses))
 
-	// Create channels for work and errors
 	type workItem struct {
 		Product   models.ProductRecord
 		Warehouse models.Warehouse
 	}
 
-	// Calculate total number of combinations
 	total := len(products) * len(warehouses)
 	workCh := make(chan workItem, total)
 	errCh := make(chan error, total)
 	var wg sync.WaitGroup
 
-	// Limit concurrency to avoid overwhelming the database
 	workers := h.workerPoolSize
 	if workers > 20 {
-		workers = 20 // Cap at reasonable amount
+		workers = 20
 	}
 
-	// Start worker goroutines
 	for i := 0; i < workers; i++ {
 		wg.Add(1)
 		go func() {
@@ -268,7 +239,6 @@ func (h *HourlyDataKeeper) takeStockSnapshots(ctx context.Context, products []mo
 		}()
 	}
 
-	// Send work to workers
 	for _, product := range products {
 		for _, warehouse := range warehouses {
 			workCh <- workItem{Product: product, Warehouse: warehouse}
@@ -276,11 +246,9 @@ func (h *HourlyDataKeeper) takeStockSnapshots(ctx context.Context, products []mo
 	}
 	close(workCh)
 
-	// Wait for all workers to finish
 	wg.Wait()
 	close(errCh)
 
-	// Collect errors
 	var errs []error
 	for err := range errCh {
 		errs = append(errs, err)
@@ -293,20 +261,17 @@ func (h *HourlyDataKeeper) takeStockSnapshots(ctx context.Context, products []mo
 	return nil
 }
 
-// processStockSnapshot processes a stock snapshot for a single product-warehouse combination
 func (h *HourlyDataKeeper) processStockSnapshot(ctx context.Context, product models.ProductRecord, warehouse models.Warehouse, snapshotTime time.Time) error {
-	// Get latest stock record for this product and warehouse
+
 	stock, err := db.GetLastStock(ctx, h.db, product.ID, warehouse.ID)
 	if err != nil {
 		return fmt.Errorf("getting last stock for product %d, warehouse %d: %w", product.ID, warehouse.ID, err)
 	}
 
-	// Skip if no stock data available
 	if stock == nil {
 		return nil
 	}
 
-	// Create snapshot record
 	stockSnapshot := &models.StockSnapshot{
 		ProductID:    stock.ProductID,
 		WarehouseID:  stock.WarehouseID,
@@ -314,7 +279,6 @@ func (h *HourlyDataKeeper) processStockSnapshot(ctx context.Context, product mod
 		SnapshotTime: snapshotTime,
 	}
 
-	// Save snapshot
 	if err := h.saveStockSnapshot(ctx, stockSnapshot); err != nil {
 		return fmt.Errorf("saving stock snapshot for product %d, warehouse %d: %w", product.ID, warehouse.ID, err)
 	}
@@ -322,15 +286,13 @@ func (h *HourlyDataKeeper) processStockSnapshot(ctx context.Context, product mod
 	return nil
 }
 
-// savePriceSnapshot saves a price snapshot record to the database with transaction
 func (h *HourlyDataKeeper) savePriceSnapshot(ctx context.Context, snapshot *models.PriceSnapshot) error {
 	tx, err := h.db.BeginTxx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("starting transaction: %w", err)
 	}
-	defer tx.Rollback() // Will be ignored if tx.Commit() is called
+	defer tx.Rollback()
 
-	// Check if snapshot already exists for this hour
 	var count int
 	err = tx.QueryRowxContext(ctx, `
 		SELECT COUNT(*) FROM price_snapshots 
@@ -343,7 +305,7 @@ func (h *HourlyDataKeeper) savePriceSnapshot(ctx context.Context, snapshot *mode
 	}
 
 	if count > 0 {
-		// Snapshot already exists, update it if necessary
+
 		_, err = tx.ExecContext(ctx, `
 			UPDATE price_snapshots SET
 				price = $1,
@@ -360,7 +322,7 @@ func (h *HourlyDataKeeper) savePriceSnapshot(ctx context.Context, snapshot *mode
 			snapshot.TechSizeName, snapshot.EditableSizePrice,
 			snapshot.ProductID, snapshot.SizeID, snapshot.SnapshotTime)
 	} else {
-		// Insert new snapshot
+
 		_, err = tx.ExecContext(ctx, `
 			INSERT INTO price_snapshots (
 				product_id, size_id, price, discount, club_discount, 
@@ -386,15 +348,13 @@ func (h *HourlyDataKeeper) savePriceSnapshot(ctx context.Context, snapshot *mode
 	return nil
 }
 
-// saveStockSnapshot saves a stock snapshot record to the database with transaction
 func (h *HourlyDataKeeper) saveStockSnapshot(ctx context.Context, snapshot *models.StockSnapshot) error {
 	tx, err := h.db.BeginTxx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("starting transaction: %w", err)
 	}
-	defer tx.Rollback() // Will be ignored if tx.Commit() is called
+	defer tx.Rollback()
 
-	// Check if snapshot already exists for this hour
 	var count int
 	err = tx.QueryRowxContext(ctx, `
 		SELECT COUNT(*) FROM stock_snapshots 
@@ -407,14 +367,14 @@ func (h *HourlyDataKeeper) saveStockSnapshot(ctx context.Context, snapshot *mode
 	}
 
 	if count > 0 {
-		// Snapshot already exists, update it if necessary
+
 		_, err = tx.ExecContext(ctx, `
 			UPDATE stock_snapshots SET
 				amount = $1
 			WHERE product_id = $2 AND warehouse_id = $3 AND snapshot_time = $4
 		`, snapshot.Amount, snapshot.ProductID, snapshot.WarehouseID, snapshot.SnapshotTime)
 	} else {
-		// Insert new snapshot
+
 		_, err = tx.ExecContext(ctx, `
 			INSERT INTO stock_snapshots (
 				product_id, warehouse_id, amount, snapshot_time
@@ -435,7 +395,6 @@ func (h *HourlyDataKeeper) saveStockSnapshot(ctx context.Context, snapshot *mode
 	return nil
 }
 
-// CleanupOldSnapshots removes snapshot data older than the retention period
 func (h *HourlyDataKeeper) CleanupOldSnapshots(ctx context.Context) error {
 	cutoffTime := time.Now().Add(-h.retentionPeriod)
 	log.Printf("Cleaning up snapshots older than %s", cutoffTime.Format("2006-01-02 15:04:05"))
@@ -444,9 +403,8 @@ func (h *HourlyDataKeeper) CleanupOldSnapshots(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("starting transaction: %w", err)
 	}
-	defer tx.Rollback() // Will be ignored if tx.Commit() is called
+	defer tx.Rollback()
 
-	// Remove old price snapshots
 	result, err := tx.ExecContext(ctx, `
 		DELETE FROM price_snapshots WHERE snapshot_time < $1
 	`, cutoffTime)
@@ -456,7 +414,6 @@ func (h *HourlyDataKeeper) CleanupOldSnapshots(ctx context.Context) error {
 
 	priceRows, _ := result.RowsAffected()
 
-	// Remove old stock snapshots
 	result, err = tx.ExecContext(ctx, `
 		DELETE FROM stock_snapshots WHERE snapshot_time < $1
 	`, cutoffTime)
@@ -476,7 +433,6 @@ func (h *HourlyDataKeeper) CleanupOldSnapshots(ctx context.Context) error {
 	return nil
 }
 
-// GetPriceSnapshotsForPeriod gets all price snapshots for a product within a time period
 func (h *HourlyDataKeeper) GetPriceSnapshotsForPeriod(
 	ctx context.Context,
 	productID int,
@@ -501,7 +457,6 @@ func (h *HourlyDataKeeper) GetPriceSnapshotsForPeriod(
 	return snapshots, nil
 }
 
-// GetStockSnapshotsForPeriod gets all stock snapshots for a product within a time period
 func (h *HourlyDataKeeper) GetStockSnapshotsForPeriod(
 	ctx context.Context,
 	productID int,
@@ -525,7 +480,6 @@ func (h *HourlyDataKeeper) GetStockSnapshotsForPeriod(
 	return snapshots, nil
 }
 
-// GetLastSnapshotTime returns the time of the last snapshot taken
 func (h *HourlyDataKeeper) GetLastSnapshotTime() time.Time {
 	return h.lastSnapshotTaken
 }

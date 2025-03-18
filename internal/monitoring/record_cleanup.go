@@ -11,7 +11,6 @@ import (
 	"github.com/jmoiron/sqlx"
 )
 
-// RecordCleanupService represents a service for cleaning up and systematizing records about prices and stocks
 type RecordCleanupService struct {
 	db                *sqlx.DB
 	cleanupInterval   time.Duration
@@ -20,7 +19,6 @@ type RecordCleanupService struct {
 	workerPoolSize    int
 }
 
-// NewRecordCleanupService creates a new record cleanup service
 func NewRecordCleanupService(
 	db *sqlx.DB,
 	cleanupInterval,
@@ -29,7 +27,7 @@ func NewRecordCleanupService(
 	workerPoolSize int,
 ) *RecordCleanupService {
 	if workerPoolSize <= 0 {
-		workerPoolSize = 5 // Default worker pool size
+		workerPoolSize = 5
 	}
 
 	return &RecordCleanupService{
@@ -41,14 +39,12 @@ func NewRecordCleanupService(
 	}
 }
 
-// RunCleanupProcess starts the record cleanup process
 func (s *RecordCleanupService) RunCleanupProcess(ctx context.Context) {
 	ticker := time.NewTicker(s.cleanupInterval)
 	defer ticker.Stop()
 
 	log.Println("Record cleanup process started")
 
-	// Run cleanup right away when starting
 	if err := s.CleanupRecords(ctx); err != nil {
 		log.Printf("Error during initial records cleanup: %v", err)
 	}
@@ -66,17 +62,14 @@ func (s *RecordCleanupService) RunCleanupProcess(ctx context.Context) {
 	}
 }
 
-// CleanupRecords performs cleanup and systematization of records
 func (s *RecordCleanupService) CleanupRecords(ctx context.Context) error {
 	log.Println("Starting records cleanup process")
 
-	// Get the time of the previous day
 	now := time.Now()
 	yesterday := now.AddDate(0, 0, -1)
 	startOfYesterday := time.Date(yesterday.Year(), yesterday.Month(), yesterday.Day(), 0, 0, 0, 0, now.Location())
 	endOfYesterday := time.Date(yesterday.Year(), yesterday.Month(), yesterday.Day(), 23, 59, 59, 999999999, now.Location())
 
-	// Get all products
 	products, err := s.getAllProducts(ctx)
 	if err != nil {
 		return fmt.Errorf("getting products for cleanup: %w", err)
@@ -84,10 +77,9 @@ func (s *RecordCleanupService) CleanupRecords(ctx context.Context) error {
 
 	log.Printf("Found %d products to process for cleanup", len(products))
 
-	// Process products in batches to avoid overwhelming the database
 	batchSize := 20
 	var wg sync.WaitGroup
-	sem := make(chan struct{}, s.workerPoolSize) // Semaphore to limit concurrent goroutines
+	sem := make(chan struct{}, s.workerPoolSize)
 
 	for i := 0; i < len(products); i += batchSize {
 		end := i + batchSize
@@ -100,32 +92,28 @@ func (s *RecordCleanupService) CleanupRecords(ctx context.Context) error {
 
 		go func(productBatch []models.ProductRecord) {
 			defer wg.Done()
-			sem <- struct{}{}        // Acquire semaphore
-			defer func() { <-sem }() // Release semaphore
+			sem <- struct{}{}
+			defer func() { <-sem }()
 
 			for _, product := range productBatch {
-				// Process product prices
+
 				if err := s.processProductPrices(ctx, product.ID, startOfYesterday, endOfYesterday); err != nil {
 					log.Printf("Error processing prices for product %d: %v", product.ID, err)
 				}
 
-				// Process product stocks
 				if err := s.processProductStocks(ctx, product.ID, startOfYesterday, endOfYesterday); err != nil {
 					log.Printf("Error processing stocks for product %d: %v", product.ID, err)
 				}
 			}
 		}(batch)
 
-		// Add a small delay between batches to reduce database load
 		if end < len(products) {
 			time.Sleep(50 * time.Millisecond)
 		}
 	}
 
-	// Wait for all batches to complete
 	wg.Wait()
 
-	// Delete old records based on retention policy
 	retentionDate := now.Add(-s.retentionInterval)
 	if err := s.deleteOldRecords(ctx, retentionDate); err != nil {
 		return fmt.Errorf("deleting old records: %w", err)
@@ -135,21 +123,19 @@ func (s *RecordCleanupService) CleanupRecords(ctx context.Context) error {
 	return nil
 }
 
-// processProductPrices processes price records for a product
 func (s *RecordCleanupService) processProductPrices(ctx context.Context, productID int, startDate, endDate time.Time) error {
-	// Get all sizes for the product
+
 	sizes, err := s.getProductSizes(ctx, productID)
 	if err != nil {
 		return fmt.Errorf("getting product sizes: %w", err)
 	}
 
 	if len(sizes) == 0 {
-		return nil // No sizes to process
+		return nil
 	}
 
-	// Process each size
 	for _, sizeID := range sizes {
-		// Get the last known price before the start date
+
 		lastKnownPrice, err := s.getLastKnownPriceBefore(ctx, productID, sizeID, startDate)
 		if err != nil {
 			log.Printf("Error getting last known price for product %d, size %d: %v",
@@ -157,7 +143,6 @@ func (s *RecordCleanupService) processProductPrices(ctx context.Context, product
 			continue
 		}
 
-		// Get all price records for the period
 		prices, err := s.getPriceRecordsForPeriod(ctx, productID, sizeID, startDate, endDate)
 		if err != nil {
 			log.Printf("Error getting price records for product %d, size %d: %v",
@@ -165,7 +150,6 @@ func (s *RecordCleanupService) processProductPrices(ctx context.Context, product
 			continue
 		}
 
-		// Ensure we have hourly snapshots
 		if err := s.ensureHourlyPriceSnapshots(ctx, productID, sizeID, lastKnownPrice, prices, startDate, endDate); err != nil {
 			log.Printf("Error ensuring hourly price snapshots for product %d, size %d: %v",
 				productID, sizeID, err)
@@ -175,7 +159,6 @@ func (s *RecordCleanupService) processProductPrices(ctx context.Context, product
 	return nil
 }
 
-// ensureHourlyPriceSnapshots ensures that there are price snapshots for each hour in the period
 func (s *RecordCleanupService) ensureHourlyPriceSnapshots(
 	ctx context.Context,
 	productID int,
@@ -185,51 +168,46 @@ func (s *RecordCleanupService) ensureHourlyPriceSnapshots(
 	startDate, endDate time.Time,
 ) error {
 	if len(prices) == 0 && lastKnownPrice == nil {
-		return nil // No data to process
+		return nil
 	}
 
-	// Combine existing prices with last known price
 	var allPrices []models.PriceRecord
 	if lastKnownPrice != nil {
-		// Add the last known price as the first entry
+
 		allPrices = append(allPrices, *lastKnownPrice)
 	}
 	allPrices = append(allPrices, prices...)
 
 	if len(allPrices) == 0 {
-		return nil // No data after combining
+		return nil
 	}
 
-	// Map of timestamps to prices for quick lookup
 	priceByTimestamp := make(map[time.Time]models.PriceRecord)
 	for _, price := range allPrices {
 		priceByTimestamp[price.RecordedAt] = price
 	}
 
-	// Generate hourly snapshots for the period
 	current := startDate
 	tx, err := s.db.BeginTxx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("starting transaction: %w", err)
 	}
-	defer tx.Rollback() // Will be ignored if committed
+	defer tx.Rollback()
 
-	// Create a duration-based ticker to roll through each hour in the period
 	for current.Before(endDate) || current.Equal(endDate) {
 		hourStart := time.Date(current.Year(), current.Month(), current.Day(), current.Hour(), 0, 0, 0, current.Location())
 		hourEnd := hourStart.Add(time.Hour)
 
-		// Find the latest price record before or at this hour
 		var latestPrice *models.PriceRecord
 		for _, price := range allPrices {
 			if !price.RecordedAt.After(hourEnd) && (latestPrice == nil || price.RecordedAt.After(latestPrice.RecordedAt)) {
-				priceCopy := price // Create a copy to avoid issues with loop variable
+				priceCopy := price
 				latestPrice = &priceCopy
 			}
 		}
 
 		if latestPrice != nil {
-			// Check if a snapshot already exists for this hour
+
 			var snapshotExists int
 			err := tx.QueryRowxContext(ctx, `
 				SELECT COUNT(*) FROM price_snapshots 
@@ -243,7 +221,7 @@ func (s *RecordCleanupService) ensureHourlyPriceSnapshots(
 			}
 
 			if snapshotExists == 0 {
-				// Create a snapshot with the latest price data
+
 				snapshotPrice := &models.PriceSnapshot{
 					ProductID:         productID,
 					SizeID:            sizeID,
@@ -277,7 +255,6 @@ func (s *RecordCleanupService) ensureHourlyPriceSnapshots(
 				}
 			}
 
-			// Move to the next hour
 			current = hourEnd
 		}
 	}
@@ -289,21 +266,19 @@ func (s *RecordCleanupService) ensureHourlyPriceSnapshots(
 	return nil
 }
 
-// processProductStocks processes stock records for a product
 func (s *RecordCleanupService) processProductStocks(ctx context.Context, productID int, startDate, endDate time.Time) error {
-	// Get all warehouses for the product
+
 	warehouses, err := s.getProductWarehouses(ctx, productID)
 	if err != nil {
 		return fmt.Errorf("getting product warehouses: %w", err)
 	}
 
 	if len(warehouses) == 0 {
-		return nil // No warehouses to process
+		return nil
 	}
 
-	// Process each warehouse
 	for _, warehouseID := range warehouses {
-		// Get the last known stock before the start date
+
 		lastKnownStock, err := s.getLastKnownStockBefore(ctx, productID, warehouseID, startDate)
 		if err != nil {
 			log.Printf("Error getting last known stock for product %d, warehouse %d: %v",
@@ -311,7 +286,6 @@ func (s *RecordCleanupService) processProductStocks(ctx context.Context, product
 			continue
 		}
 
-		// Get all stock records for the period
 		stocks, err := s.getStockRecordsForPeriod(ctx, productID, warehouseID, startDate, endDate)
 		if err != nil {
 			log.Printf("Error getting stock records for product %d, warehouse %d: %v",
@@ -319,7 +293,6 @@ func (s *RecordCleanupService) processProductStocks(ctx context.Context, product
 			continue
 		}
 
-		// Ensure we have hourly snapshots
 		if err := s.ensureHourlyStockSnapshots(ctx, productID, warehouseID, lastKnownStock, stocks, startDate, endDate); err != nil {
 			log.Printf("Error ensuring hourly stock snapshots for product %d, warehouse %d: %v",
 				productID, warehouseID, err)
@@ -329,7 +302,6 @@ func (s *RecordCleanupService) processProductStocks(ctx context.Context, product
 	return nil
 }
 
-// ensureHourlyStockSnapshots ensures that there are stock snapshots for each hour in the period
 func (s *RecordCleanupService) ensureHourlyStockSnapshots(
 	ctx context.Context,
 	productID int,
@@ -339,45 +311,41 @@ func (s *RecordCleanupService) ensureHourlyStockSnapshots(
 	startDate, endDate time.Time,
 ) error {
 	if len(stocks) == 0 && lastKnownStock == nil {
-		return nil // No data to process
+		return nil
 	}
 
-	// Combine existing stocks with last known stock
 	var allStocks []models.StockRecord
 	if lastKnownStock != nil {
-		// Add the last known stock as the first entry
+
 		allStocks = append(allStocks, *lastKnownStock)
 	}
 	allStocks = append(allStocks, stocks...)
 
 	if len(allStocks) == 0 {
-		return nil // No data after combining
+		return nil
 	}
 
-	// Generate hourly snapshots for the period
 	current := startDate
 	tx, err := s.db.BeginTxx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("starting transaction: %w", err)
 	}
-	defer tx.Rollback() // Will be ignored if committed
+	defer tx.Rollback()
 
-	// Create a duration-based ticker to roll through each hour in the period
 	for current.Before(endDate) || current.Equal(endDate) {
 		hourStart := time.Date(current.Year(), current.Month(), current.Day(), current.Hour(), 0, 0, 0, current.Location())
 		hourEnd := hourStart.Add(time.Hour)
 
-		// Find the latest stock record before or at this hour
 		var latestStock *models.StockRecord
 		for _, stock := range allStocks {
 			if !stock.RecordedAt.After(hourEnd) && (latestStock == nil || stock.RecordedAt.After(latestStock.RecordedAt)) {
-				stockCopy := stock // Create a copy to avoid issues with loop variable
+				stockCopy := stock
 				latestStock = &stockCopy
 			}
 		}
 
 		if latestStock != nil {
-			// Check if a snapshot already exists for this hour
+
 			var snapshotExists int
 			err := tx.QueryRowxContext(ctx, `
 				SELECT COUNT(*) FROM stock_snapshots 
@@ -391,7 +359,7 @@ func (s *RecordCleanupService) ensureHourlyStockSnapshots(
 			}
 
 			if snapshotExists == 0 {
-				// Create a snapshot with the latest stock data
+
 				snapshotStock := &models.StockSnapshot{
 					ProductID:    productID,
 					WarehouseID:  warehouseID,
@@ -413,7 +381,6 @@ func (s *RecordCleanupService) ensureHourlyStockSnapshots(
 				}
 			}
 
-			// Move to the next hour
 			current = hourEnd
 		}
 	}
@@ -425,9 +392,6 @@ func (s *RecordCleanupService) ensureHourlyStockSnapshots(
 	return nil
 }
 
-// Missing methods from the second file that are needed in the first file
-
-// getAllProducts returns all products from the database
 func (s *RecordCleanupService) getAllProducts(ctx context.Context) ([]models.ProductRecord, error) {
 	var products []models.ProductRecord
 	query := "SELECT id, nm_id, vendor_code, barcode, name, created_at FROM products"
@@ -440,7 +404,6 @@ func (s *RecordCleanupService) getAllProducts(ctx context.Context) ([]models.Pro
 	return products, nil
 }
 
-// getProductSizes returns all sizes for a product
 func (s *RecordCleanupService) getProductSizes(ctx context.Context, productID int) ([]int, error) {
 	var sizes []int
 	query := "SELECT DISTINCT size_id FROM prices WHERE product_id = $1"
@@ -453,7 +416,6 @@ func (s *RecordCleanupService) getProductSizes(ctx context.Context, productID in
 	return sizes, nil
 }
 
-// getProductWarehouses returns all warehouses that have the product
 func (s *RecordCleanupService) getProductWarehouses(ctx context.Context, productID int) ([]int64, error) {
 	var warehouses []int64
 	query := "SELECT DISTINCT warehouse_id FROM stocks WHERE product_id = $1"
@@ -466,7 +428,6 @@ func (s *RecordCleanupService) getProductWarehouses(ctx context.Context, product
 	return warehouses, nil
 }
 
-// getLastKnownPriceBefore returns the last known price before the specified date
 func (s *RecordCleanupService) getLastKnownPriceBefore(ctx context.Context, productID int, sizeID int, date time.Time) (*models.PriceRecord, error) {
 	var record models.PriceRecord
 	query := `
@@ -479,7 +440,7 @@ func (s *RecordCleanupService) getLastKnownPriceBefore(ctx context.Context, prod
 	err := s.db.GetContext(ctx, &record, query, productID, sizeID, date)
 	if err != nil {
 		if err.Error() == "sql: no rows in result set" {
-			return nil, nil // No previous records
+			return nil, nil
 		}
 		return nil, fmt.Errorf("selecting last known price: %w", err)
 	}
@@ -487,7 +448,6 @@ func (s *RecordCleanupService) getLastKnownPriceBefore(ctx context.Context, prod
 	return &record, nil
 }
 
-// getLastKnownStockBefore returns the last known stock before the specified date
 func (s *RecordCleanupService) getLastKnownStockBefore(ctx context.Context, productID int, warehouseID int64, date time.Time) (*models.StockRecord, error) {
 	var record models.StockRecord
 	query := `
@@ -500,7 +460,7 @@ func (s *RecordCleanupService) getLastKnownStockBefore(ctx context.Context, prod
 	err := s.db.GetContext(ctx, &record, query, productID, warehouseID, date)
 	if err != nil {
 		if err.Error() == "sql: no rows in result set" {
-			return nil, nil // No previous records
+			return nil, nil
 		}
 		return nil, fmt.Errorf("selecting last known stock: %w", err)
 	}
@@ -508,7 +468,6 @@ func (s *RecordCleanupService) getLastKnownStockBefore(ctx context.Context, prod
 	return &record, nil
 }
 
-// getPriceRecordsForPeriod returns all price records for a period
 func (s *RecordCleanupService) getPriceRecordsForPeriod(ctx context.Context, productID int, sizeID int, startTime, endTime time.Time) ([]models.PriceRecord, error) {
 	var records []models.PriceRecord
 	query := `
@@ -525,7 +484,6 @@ func (s *RecordCleanupService) getPriceRecordsForPeriod(ctx context.Context, pro
 	return records, nil
 }
 
-// getStockRecordsForPeriod returns all stock records for a period
 func (s *RecordCleanupService) getStockRecordsForPeriod(ctx context.Context, productID int, warehouseID int64, startTime, endTime time.Time) ([]models.StockRecord, error) {
 	var records []models.StockRecord
 	query := `
@@ -542,16 +500,14 @@ func (s *RecordCleanupService) getStockRecordsForPeriod(ctx context.Context, pro
 	return records, nil
 }
 
-// deleteOldRecords deletes records older than the specified date
 func (s *RecordCleanupService) deleteOldRecords(ctx context.Context, retentionDate time.Time) error {
-	// Delete old price records
+
 	priceQuery := "DELETE FROM prices WHERE recorded_at < $1"
 	_, err := s.db.ExecContext(ctx, priceQuery, retentionDate)
 	if err != nil {
 		return fmt.Errorf("deleting old price records: %w", err)
 	}
 
-	// Delete old stock records
 	stockQuery := "DELETE FROM stocks WHERE recorded_at < $1"
 	_, err = s.db.ExecContext(ctx, stockQuery, retentionDate)
 	if err != nil {

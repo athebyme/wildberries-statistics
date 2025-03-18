@@ -6,21 +6,18 @@ import (
 	"wbmonitoring/monitoring/internal/models"
 )
 
-// SafeCursorManager manages cursors safely in concurrent environment.
 type SafeCursorManager struct {
 	mu          sync.Mutex
 	usedCursors map[string]bool
 	lastCursor  models.Cursor
 }
 
-// NewSafeCursorManager creates a new SafeCursorManager.
 func NewSafeCursorManager() *SafeCursorManager {
 	return &SafeCursorManager{
 		usedCursors: make(map[string]bool),
 	}
 }
 
-// GetUniqueCursor returns a unique cursor or false if already used.
 func (scm *SafeCursorManager) GetUniqueCursor(nmID int, updatedAt string) (models.Cursor, bool) {
 	scm.mu.Lock()
 	defer scm.mu.Unlock()

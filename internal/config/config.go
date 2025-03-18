@@ -22,7 +22,6 @@ const (
 	ProductUpdateInterval = 5 * time.Hour // Интервал обновления продуктов
 )
 
-// Config represents the service configuration.
 type Config struct {
 	WorkerCount           int
 	MaxRetries            int
@@ -41,7 +40,6 @@ type Config struct {
 	UseImprovedServices   bool
 }
 
-// LoadConfig loads the configuration from environment variables.
 func LoadConfig() Config {
 	return Config{
 		WorkerCount:           getEnvInt("WORKER_COUNT", WorkerCount),
@@ -58,7 +56,7 @@ func LoadConfig() Config {
 		PriceThreshold:        getEnvFloat("PRICE_THRESHOLD", PriceChangeThreshold),
 		StockThreshold:        getEnvFloat("STOCK_THRESHOLD", StockChangeThreshold),
 		AllowedUserIDs:        getEnvIntSlice("TELEGRAM_ALLOWED_USER_IDS", []int64{}),
-		UseImprovedServices:   getEnvBool("USE_IMPROVED_SERVICES", false), // Added this line
+		UseImprovedServices:   getEnvBool("USE_IMPROVED_SERVICES", false),
 	}
 }
 

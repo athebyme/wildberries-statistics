@@ -22,7 +22,6 @@ import (
 	"wbmonitoring/monitoring/internal/telegram/report"
 )
 
-// MonitoringService struct
 type Service struct {
 	db               *sqlx.DB
 	config           config.Config
@@ -37,7 +36,6 @@ type Service struct {
 	ctx context.Context
 }
 
-// NewMonitoringService creates a new MonitoringService.
 func NewMonitoringService(cfg config.Config) (*Service, error) {
 	// Подключаемся к базе данных
 	database, err := sqlx.Connect("postgres", cfg.PGConnString)
@@ -122,7 +120,6 @@ func NewMonitoringService(cfg config.Config) (*Service, error) {
 	}, nil
 }
 
-// RunProductUpdater запускает обновление продуктов по расписанию.
 func (m *Service) RunProductUpdater(ctx context.Context) error {
 	ticker := time.NewTicker(m.config.ProductUpdateInterval)
 	defer ticker.Stop()
@@ -142,7 +139,6 @@ func (m *Service) RunProductUpdater(ctx context.Context) error {
 	}
 }
 
-// UpdateProducts обновляет список продуктов в базе данных, используя SearchEngine.
 func (m *Service) UpdateProducts(ctx context.Context) error {
 	nomenclatureChan := make(chan models.Nomenclature) // Канал для приема номенклатур
 	settings := models.Settings{
@@ -155,21 +151,20 @@ func (m *Service) UpdateProducts(ctx context.Context) error {
 		err := m.searchEngine.GetNomenclaturesWithLimitConcurrentlyPutIntoChannel(ctx, settings, locale, nomenclatureChan)
 		if err != nil {
 			log.Printf("GetNomenclaturesWithLimitConcurrentlyPutIntoChannel failed: %v", err)
-			close(nomenclatureChan) // Ensure channel is closed on error
+			close(nomenclatureChan)
 		}
 	}()
 
 	for nomenclature := range nomenclatureChan {
 		if err := m.ProcessNomenclature(ctx, nomenclature); err != nil {
 			log.Printf("Error processing nomenclature %d: %v", nomenclature.NmID, err)
-			return fmt.Errorf("processing nomenclature %d: %w", nomenclature.NmID, err) // Return error to stop update cycle
+			return fmt.Errorf("processing nomenclature %d: %w", nomenclature.NmID, err)
 		}
 	}
 
 	return nil
 }
 
-// ProcessNomenclature обрабатывает одну номенклатуру, сохраняя или обновляя данные в базе.
 func (m *Service) ProcessNomenclature(ctx context.Context, nomenclature models.Nomenclature) error {
 	barcode := ""
 	if len(nomenclature.Sizes) > 0 && len(nomenclature.Sizes[0].Skus) > 0 {
@@ -205,21 +200,18 @@ func (m *Service) ProcessNomenclature(ctx context.Context, nomenclature models.N
 	return nil
 }
 
-// RunMonitoring запускает основной цикл мониторинга.
 func (m *Service) RunMonitoring(ctx context.Context) error {
 
 	m.ctx = ctx
 
 	// Отправляем приветственное сообщение
-	//if err := m.telegramBot.SendTelegramAlert("🔄 Сервис мониторинга запущен"); err != nil {
-	//	log.Printf("Failed to send welcome message: %v", err)
+
 	//}
 
 	// Запускаем бота в отдельной горутине
 	go m.telegramBot.StartBot(ctx)
 
 	// Запускаем сервис очистки записей
-	//go m.recordCleanupSvc.RunCleanupProcess(ctx)
 
 	go func() {
 		err := m.UpdateWarehouses(ctx)
@@ -254,9 +246,8 @@ func (m *Service) RunMonitoring(ctx context.Context) error {
 	}
 }
 
-// UpdateWarehouses updates the list of warehouses in the database by fetching from the API.
 func (m *Service) UpdateWarehouses(ctx context.Context) error {
-	apiKey := m.config.ApiKey // Assuming API key is in config
+	apiKey := m.config.ApiKey
 	if apiKey == "" {
 		return fmt.Errorf("API key for Wildberries is not configured")
 	}
@@ -270,7 +261,6 @@ func (m *Service) UpdateWarehouses(ctx context.Context) error {
 	return nil
 }
 
-// runDailyReporting запускает процесс отправки ежедневных отчетов
 func (m *Service) runDailyReporting(ctx context.Context) {
 	// Вычисляем время до следующего запуска (10:00 утра)
 	now := time.Now()
@@ -319,7 +309,6 @@ func (m *Service) SendGreetings(ctx context.Context) error {
 	return nil
 }
 
-// ProcessMonitoring обрабатывает данные мониторинга.
 func (m *Service) ProcessMonitoring(ctx context.Context) error {
 	log.Println("Starting monitoring cycle")
 
@@ -344,7 +333,6 @@ func (m *Service) ProcessMonitoring(ctx context.Context) error {
 	return nil
 }
 
-// GetAllProducts retrieves all products from the database.
 func (m *Service) GetAllProducts(ctx context.Context) ([]models.ProductRecord, error) {
 	var products []models.ProductRecord
 	query := `SELECT id, nm_id, vendor_code, barcode, name, created_at FROM products`
@@ -356,7 +344,6 @@ func (m *Service) GetAllProducts(ctx context.Context) ([]models.ProductRecord, e
 	return products, nil
 }
 
-// processStocks обрабатывает складские остатки для всех товаров.
 func (m *Service) processStocks(ctx context.Context, products []models.ProductRecord) error {
 	// Получаем список складов
 	warehouses, err := m.GetWarehouses(ctx)
@@ -374,7 +361,6 @@ func (m *Service) processStocks(ctx context.Context, products []models.ProductRe
 	return nil
 }
 
-// processWarehouseStocks обрабатывает остатки для конкретного склада.
 func (m *Service) processWarehouseStocks(ctx context.Context, warehouse models.Warehouse, products []models.ProductRecord) error {
 	// Разбиваем продукты на партии по 1000 товаров (ограничение API)
 	batchSize := 1000
@@ -432,10 +418,9 @@ func (m *Service) processWarehouseStocks(ctx context.Context, warehouse models.W
 	return nil
 }
 
-// processPrices обрабатывает цены товаров.
 func (m *Service) processPrices(ctx context.Context, products []models.ProductRecord) error {
 	// Разбиваем продукты на группы для запросов с лимитом
-	// API позволяет максимум 1000 товаров на страницу
+
 	limit := 1000
 
 	// Группируем продукты по nmID
@@ -496,7 +481,6 @@ func (m *Service) processPrices(ctx context.Context, products []models.ProductRe
 	return nil
 }
 
-// processPriceRecord обрабатывает запись о цене размера товара.
 func (m *Service) processPriceRecord(ctx context.Context, product *models.ProductRecord, size models.GoodSize) error {
 	// Вычисляем итоговую цену с учетом скидок
 	finalPrice := size.DiscountedPrice
@@ -524,7 +508,6 @@ func (m *Service) processPriceRecord(ctx context.Context, product *models.Produc
 	return nil
 }
 
-// CheckPriceChanges проверяет изменения цен и отправляет уведомления.
 func (m *Service) CheckPriceChanges(ctx context.Context, product *models.ProductRecord, newPrice *models.PriceRecord) error {
 	lastPrice, err := m.GetLastPrice(ctx, product.ID)
 	if err != nil {
@@ -574,7 +557,6 @@ func (m *Service) CheckPriceChanges(ctx context.Context, product *models.Product
 	return nil
 }
 
-// CheckStockChanges проверяет изменения остатков и отправляет уведомления.
 func (m *Service) CheckStockChanges(ctx context.Context, product *models.ProductRecord, newStock *models.StockRecord) error {
 	lastStock, err := db.GetLastStock(ctx, m.db, product.ID, newStock.WarehouseID)
 	if err != nil {
@@ -626,62 +608,50 @@ func (m *Service) CheckStockChanges(ctx context.Context, product *models.Product
 	return nil
 }
 
-// GetWarehouses retrieves warehouses from the API.
 func (m *Service) GetWarehouses(ctx context.Context) ([]models.Warehouse, error) {
 	return api.GetWarehouses(ctx, m.httpClient, m.config.ApiKey, m.warehouseLimiter)
 }
 
-// GetStocks retrieves stock information from the API.
 func (m *Service) GetStocks(ctx context.Context, warehouseID int64, skus []string) (*models.StockResponse, error) {
 	return api.GetStocks(ctx, m.httpClient, m.config.ApiKey, m.stocksLimiter, warehouseID, skus)
 }
 
-// GetPriceHistory retrieves price history from the API.
 func (m *Service) GetPriceHistory(ctx context.Context, uploadID int, limit, offset int) (*models.PriceHistoryResponse, error) {
 	return api.GetPriceHistory(ctx, m.httpClient, m.config.ApiKey, m.pricesLimiter, uploadID, limit, offset)
 }
 
-// GetGoodsPrices retrieves goods prices from the API.
 func (m *Service) GetGoodsPrices(ctx context.Context, limit int, offset int, filterNmID int) (*models.GoodsPricesResponse, error) {
 	return api.GetGoodsPrices(ctx, m.httpClient, m.config.ApiKey, m.pricesLimiter, limit, offset, filterNmID)
 }
 
-// GetLastPrice retrieves the last price record from the database.
 func (m *Service) GetLastPrice(ctx context.Context, productID int) (*models.PriceRecord, error) {
 	return db.GetLastPrice(ctx, m.db, productID)
 }
 
-// GetLastStock retrieves the last stock record from the database.
 func (m *Service) GetLastStock(ctx context.Context, productID int, warehouseID int64) (*models.StockRecord, error) {
 	return db.GetLastStock(ctx, m.db, productID, warehouseID)
 }
 
-// SavePrice saves a price record to the database.
 func (m *Service) SavePrice(ctx context.Context, price *models.PriceRecord) error {
 	return db.SavePrice(ctx, m.db, price)
 }
 
-// SaveStock saves a stock record to the database.
 func (m *Service) SaveStock(ctx context.Context, stock *models.StockRecord) error {
 	return db.SaveStock(ctx, m.db, stock)
 }
 
-// InitDB initializes the database schema.
 func (m *Service) InitDB() error {
 	return db.InitDB(m.db)
 }
 
-// GetProductCount retrieves the count of products in the database.
 func (m *Service) GetProductCount(ctx context.Context) (int, error) {
 	return db.GetProductCount(ctx, m.db)
 }
 
-// UpdatePriceCheckStatus updates the last price check status in the database.
 func (m *Service) UpdatePriceCheckStatus(ctx context.Context, productID int) error {
 	return db.UpdatePriceCheckStatus(ctx, m.db, productID)
 }
 
-// UpdateStockCheckStatus updates the last stock check status in the database.
 func (m *Service) UpdateStockCheckStatus(ctx context.Context, productID int) error {
 	return db.UpdateStockCheckStatus(ctx, m.db, productID)
 }
