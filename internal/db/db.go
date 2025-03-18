@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"github.com/lib/pq"
 	"golang.org/x/time/rate"
 	"net/http"
 	"time"
@@ -16,9 +17,7 @@ import (
 	_ "github.com/lib/pq"
 )
 
-// SQL-скрипт для создания схемы БД
 const schemaSQL = `
--- Modify the existing schema
 CREATE TABLE IF NOT EXISTS products (
     id SERIAL PRIMARY KEY,
     nm_id INTEGER NOT NULL UNIQUE,
@@ -31,7 +30,6 @@ CREATE TABLE IF NOT EXISTS products (
 CREATE UNIQUE INDEX IF NOT EXISTS idx_products_nm_id ON products(nm_id);
 CREATE INDEX IF NOT EXISTS idx_products_barcode ON products(barcode);
 
--- Create a new table for monitoring status
 CREATE TABLE IF NOT EXISTS monitoring_status (
     id SERIAL PRIMARY KEY,
     product_id INTEGER NOT NULL REFERENCES products(id),
@@ -42,7 +40,6 @@ CREATE TABLE IF NOT EXISTS monitoring_status (
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_monitoring_status_product_id ON monitoring_status(product_id);
 
--- Keep existing tables
 CREATE TABLE IF NOT EXISTS prices (
     id SERIAL PRIMARY KEY,
     product_id INTEGER NOT NULL REFERENCES products(id),
@@ -117,7 +114,6 @@ CREATE INDEX IF NOT EXISTS idx_warehouses_wid ON warehouses(warehouse_id);
 CREATE INDEX IF NOT EXISTS idx_warehouses_id ON warehouses(id);
 
 
--- Create the price_snapshots table
 CREATE TABLE IF NOT EXISTS price_snapshots (
     id SERIAL PRIMARY KEY,
     product_id INTEGER NOT NULL,
@@ -134,10 +130,10 @@ CREATE TABLE IF NOT EXISTS price_snapshots (
     FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE CASCADE
 );
 
--- Create index on product_id and snapshot_time for faster queries
+
 CREATE INDEX IF NOT EXISTS idx_price_snapshots_product_time ON price_snapshots(product_id, snapshot_time);
 
--- Create the stock_snapshots table
+
 CREATE TABLE IF NOT EXISTS stock_snapshots (
     id SERIAL PRIMARY KEY,
     product_id INTEGER NOT NULL,
@@ -148,12 +144,33 @@ CREATE TABLE IF NOT EXISTS stock_snapshots (
     FOREIGN KEY (warehouse_id) REFERENCES warehouses(id) ON DELETE CASCADE
 );
 
--- Create index on product_id, warehouse_id and snapshot_time for faster queries
 CREATE INDEX IF NOT EXISTS idx_stock_snapshots_product_warehouse_time 
     ON stock_snapshots(product_id, warehouse_id, snapshot_time);
+
+CREATE INDEX IF NOT EXISTS idx_prices_product_date ON prices(product_id, recorded_at);
+
+CREATE INDEX IF NOT EXISTS idx_prices_recorded_at_desc ON prices(recorded_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_stocks_product_warehouse_date ON stocks(product_id, warehouse_id, recorded_at);
+
+CREATE INDEX IF NOT EXISTS idx_stocks_recorded_at_desc ON stocks(recorded_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_price_snapshots_time ON price_snapshots(snapshot_time);
+
+CREATE INDEX IF NOT EXISTS idx_stock_snapshots_time ON stock_snapshots(snapshot_time);
+
+CREATE INDEX IF NOT EXISTS idx_hourly_price_product_time ON hourly_price_data(product_id, hour_timestamp);
+
+CREATE INDEX IF NOT EXISTS idx_hourly_stock_product_warehouse_time ON hourly_stock_data(product_id, warehouse_id, hour_timestamp);
+
+ANALYZE prices;
+ANALYZE stocks;
+ANALYZE price_snapshots;
+ANALYZE stock_snapshots;
+ANALYZE hourly_price_data;
+ANALYZE hourly_stock_data;
 `
 
-// InitDB initializes the database schema.
 func InitDB(db *sqlx.DB) error {
 	_, err := db.Exec(schemaSQL)
 	if err != nil {
@@ -162,7 +179,6 @@ func InitDB(db *sqlx.DB) error {
 	return nil
 }
 
-// GetLastPrice retrieves the last price record from the database.
 func GetLastPrice(ctx context.Context, db *sqlx.DB, productID int) (*models.PriceRecord, error) {
 	var price models.PriceRecord
 	err := db.GetContext(ctx, &price,
@@ -179,7 +195,6 @@ func GetLastPrice(ctx context.Context, db *sqlx.DB, productID int) (*models.Pric
 	return &price, nil
 }
 
-// GetLastStock retrieves the last stock record from the database.
 func GetLastStock(ctx context.Context, db *sqlx.DB, productID int, warehouseID int64) (*models.StockRecord, error) {
 	var stock models.StockRecord
 	err := db.GetContext(ctx, &stock,
@@ -196,7 +211,6 @@ func GetLastStock(ctx context.Context, db *sqlx.DB, productID int, warehouseID i
 	return &stock, nil
 }
 
-// SavePrice saves a price record to the database.
 func SavePrice(ctx context.Context, db *sqlx.DB, price *models.PriceRecord) error {
 	query := `
 		INSERT INTO prices (product_id, size_id, price, discount, club_discount, final_price, club_final_price, currency_iso_code, tech_size_name, editable_size_price, recorded_at)
@@ -211,7 +225,6 @@ func SavePrice(ctx context.Context, db *sqlx.DB, price *models.PriceRecord) erro
 	return row.Scan(&price.ProductID)
 }
 
-// SaveStock saves a stock record to the database.
 func SaveStock(ctx context.Context, db *sqlx.DB, stock *models.StockRecord) error {
 	query := `
 		INSERT INTO stocks (product_id, warehouse_id, amount, recorded_at)
@@ -225,7 +238,6 @@ func SaveStock(ctx context.Context, db *sqlx.DB, stock *models.StockRecord) erro
 	return row.Scan(&stock.ProductID)
 }
 
-// GetProductCount retrieves the count of products in the database.
 func GetProductCount(ctx context.Context, db *sqlx.DB) (int, error) {
 	var count int
 	err := db.GetContext(ctx, &count, "SELECT COUNT(*) FROM products")
@@ -235,7 +247,6 @@ func GetProductCount(ctx context.Context, db *sqlx.DB) (int, error) {
 	return count, nil
 }
 
-// GetAllProducts retrieves all products from the database.
 func GetAllProducts(ctx context.Context, db *sqlx.DB) ([]models.ProductRecord, error) {
 	var products []models.ProductRecord
 	query := `SELECT id, nm_id, vendor_code, barcode, name, created_at FROM products`
@@ -247,7 +258,6 @@ func GetAllProducts(ctx context.Context, db *sqlx.DB) ([]models.ProductRecord, e
 	return products, nil
 }
 
-// UpdatePriceCheckStatus updates the last price check status in the database.
 func UpdatePriceCheckStatus(ctx context.Context, db *sqlx.DB, productID int) error {
 	query := `
         INSERT INTO monitoring_status (product_id, last_price_check)
@@ -264,7 +274,6 @@ func UpdatePriceCheckStatus(ctx context.Context, db *sqlx.DB, productID int) err
 	return nil
 }
 
-// UpdateStockCheckStatus updates the last stock check status in the database.
 func UpdateStockCheckStatus(ctx context.Context, db *sqlx.DB, productID int) error {
 	query := `
         INSERT INTO monitoring_status (product_id, last_stock_check)
@@ -281,7 +290,6 @@ func UpdateStockCheckStatus(ctx context.Context, db *sqlx.DB, productID int) err
 	return nil
 }
 
-// UpdateWarehousesFromAPI fetches warehouses from the Wildberries API and updates the database.
 func UpdateWarehousesFromAPI(ctx context.Context, db *sqlx.DB, client *http.Client, apiKey string, limiter *rate.Limiter) error {
 	warehouses, err := api.GetWarehouses(ctx, client, apiKey, limiter)
 	if err != nil {
@@ -292,7 +300,7 @@ func UpdateWarehousesFromAPI(ctx context.Context, db *sqlx.DB, client *http.Clie
 	if err != nil {
 		return fmt.Errorf("failed to start transaction: %w", err)
 	}
-	defer tx.Rollback() // Rollback if function returns before commit
+	defer tx.Rollback()
 
 	for _, warehouse := range warehouses {
 		existingWarehouse, err := GetWarehouseByID(ctx, tx, int(warehouse.ID))
@@ -301,7 +309,7 @@ func UpdateWarehousesFromAPI(ctx context.Context, db *sqlx.DB, client *http.Clie
 		}
 
 		if existingWarehouse == nil {
-			// Warehouse doesn't exist, insert new one
+
 			_, err = tx.NamedExecContext(ctx, `
 				INSERT INTO warehouses (id, name)
 				VALUES (:id, :name)
@@ -310,7 +318,7 @@ func UpdateWarehousesFromAPI(ctx context.Context, db *sqlx.DB, client *http.Clie
 				return fmt.Errorf("failed to insert new warehouse: %w", err)
 			}
 		} else {
-			// Warehouse exists, update it
+
 			_, err = tx.NamedExecContext(ctx, `
 				UPDATE warehouses
 				SET name = :name
@@ -329,7 +337,6 @@ func UpdateWarehousesFromAPI(ctx context.Context, db *sqlx.DB, client *http.Clie
 	return nil
 }
 
-// GetWarehouseByID retrieves a warehouse by its ID.
 func GetWarehouseByID(ctx context.Context, db sqlx.QueryerContext, id int) (*models.Warehouse, error) {
 	var warehouse models.Warehouse
 	err := sqlx.GetContext(ctx, db, &warehouse, "SELECT id, name FROM warehouses WHERE id = $1", id)
@@ -342,7 +349,6 @@ func GetWarehouseByID(ctx context.Context, db sqlx.QueryerContext, id int) (*mod
 	return &warehouse, nil
 }
 
-// GetAllWarehouses retrieves all warehouses from the database.
 func GetAllWarehouses(ctx context.Context, db *sqlx.DB) ([]models.Warehouse, error) {
 	var warehouses []models.Warehouse
 	err := sqlx.SelectContext(ctx, db, &warehouses, "SELECT id, name FROM warehouses")
@@ -352,7 +358,6 @@ func GetAllWarehouses(ctx context.Context, db *sqlx.DB) ([]models.Warehouse, err
 	return warehouses, nil
 }
 
-// GetPricesForPeriod получает историю цен товара за период
 func GetPricesForPeriod(ctx context.Context, db *sqlx.DB, productID int, startDate, endDate time.Time) ([]models.PriceRecord, error) {
 	prices := []models.PriceRecord{}
 	err := db.SelectContext(ctx, &prices,
@@ -364,7 +369,6 @@ func GetPricesForPeriod(ctx context.Context, db *sqlx.DB, productID int, startDa
 	return prices, nil
 }
 
-// GetStocksForPeriod получает историю остатков товара на складе за период
 func GetStocksForPeriod(ctx context.Context, db *sqlx.DB, productID int, warehouseID int64, startDate, endDate time.Time) ([]models.StockRecord, error) {
 	stocks := []models.StockRecord{}
 	err := db.SelectContext(ctx, &stocks,
@@ -374,4 +378,130 @@ func GetStocksForPeriod(ctx context.Context, db *sqlx.DB, productID int, warehou
 		return nil, fmt.Errorf("fetching stocks for period from DB: %w", err)
 	}
 	return stocks, nil
+}
+
+// GetBatchPricesForProducts загружает цены для списка продуктов за период одним запросом
+func GetBatchPricesForProducts(ctx context.Context, db *sqlx.DB, productIDs []int, startDate, endDate time.Time) (map[int][]models.PriceRecord, error) {
+	// Преобразуем slice в строку для запроса
+	if len(productIDs) == 0 {
+		return make(map[int][]models.PriceRecord), nil
+	}
+
+	query := `
+        SELECT * FROM prices 
+        WHERE product_id = ANY($1) AND recorded_at BETWEEN $2 AND $3 
+        ORDER BY product_id, recorded_at
+    `
+
+	// Преобразуем productIDs в pq.Array
+	var prices []models.PriceRecord
+	err := db.SelectContext(ctx, &prices, query, pq.Array(productIDs), startDate, endDate)
+	if err != nil {
+		return nil, fmt.Errorf("fetching batch prices: %w", err)
+	}
+
+	// Группируем результаты по product_id
+	result := make(map[int][]models.PriceRecord)
+	for _, price := range prices {
+		result[price.ProductID] = append(result[price.ProductID], price)
+	}
+
+	return result, nil
+}
+
+// GetBatchStocksForProducts загружает остатки для списка продуктов и складов за период одним запросом
+func GetBatchStocksForProducts(ctx context.Context, db *sqlx.DB, productIDs []int, warehouseIDs []int64, startDate, endDate time.Time) (map[int]map[int64][]models.StockRecord, error) {
+	if len(productIDs) == 0 || len(warehouseIDs) == 0 {
+		return make(map[int]map[int64][]models.StockRecord), nil
+	}
+
+	query := `
+        SELECT * FROM stocks 
+        WHERE product_id = ANY($1) AND warehouse_id = ANY($2) AND recorded_at BETWEEN $3 AND $4
+        ORDER BY product_id, warehouse_id, recorded_at
+    `
+
+	var stocks []models.StockRecord
+	err := db.SelectContext(ctx, &stocks, query, pq.Array(productIDs), pq.Array(warehouseIDs), startDate, endDate)
+	if err != nil {
+		return nil, fmt.Errorf("fetching batch stocks: %w", err)
+	}
+
+	// Группируем результаты по product_id и warehouse_id
+	result := make(map[int]map[int64][]models.StockRecord)
+	for _, stock := range stocks {
+		if _, ok := result[stock.ProductID]; !ok {
+			result[stock.ProductID] = make(map[int64][]models.StockRecord)
+		}
+		result[stock.ProductID][stock.WarehouseID] = append(result[stock.ProductID][stock.WarehouseID], stock)
+	}
+
+	return result, nil
+}
+
+// GetLatestPricesForProducts получает последние цены для списка продуктов
+func GetLatestPricesForProducts(ctx context.Context, db *sqlx.DB, productIDs []int) (map[int]models.PriceRecord, error) {
+	if len(productIDs) == 0 {
+		return make(map[int]models.PriceRecord), nil
+	}
+
+	// Используем оконную функцию для получения последних цен
+	query := `
+        WITH ranked_prices AS (
+            SELECT 
+                p.*,
+                ROW_NUMBER() OVER (PARTITION BY product_id ORDER BY recorded_at DESC) as rn
+            FROM prices p
+            WHERE product_id = ANY($1)
+        )
+        SELECT * FROM ranked_prices WHERE rn = 1
+    `
+
+	var prices []models.PriceRecord
+	err := db.SelectContext(ctx, &prices, query, pq.Array(productIDs))
+	if err != nil {
+		return nil, fmt.Errorf("fetching latest prices: %w", err)
+	}
+
+	result := make(map[int]models.PriceRecord)
+	for _, price := range prices {
+		result[price.ProductID] = price
+	}
+
+	return result, nil
+}
+
+// GetLatestStocksForProducts получает последние остатки для списка продуктов и складов
+func GetLatestStocksForProducts(ctx context.Context, db *sqlx.DB, productIDs []int, warehouseIDs []int64) (map[int]map[int64]models.StockRecord, error) {
+	if len(productIDs) == 0 || len(warehouseIDs) == 0 {
+		return make(map[int]map[int64]models.StockRecord), nil
+	}
+
+	// Используем оконную функцию для получения последних остатков
+	query := `
+        WITH ranked_stocks AS (
+            SELECT 
+                s.*,
+                ROW_NUMBER() OVER (PARTITION BY product_id, warehouse_id ORDER BY recorded_at DESC) as rn
+            FROM stocks s
+            WHERE product_id = ANY($1) AND warehouse_id = ANY($2)
+        )
+        SELECT * FROM ranked_stocks WHERE rn = 1
+    `
+
+	var stocks []models.StockRecord
+	err := db.SelectContext(ctx, &stocks, query, pq.Array(productIDs), pq.Array(warehouseIDs))
+	if err != nil {
+		return nil, fmt.Errorf("fetching latest stocks: %w", err)
+	}
+
+	result := make(map[int]map[int64]models.StockRecord)
+	for _, stock := range stocks {
+		if _, ok := result[stock.ProductID]; !ok {
+			result[stock.ProductID] = make(map[int64]models.StockRecord)
+		}
+		result[stock.ProductID][stock.WarehouseID] = stock
+	}
+
+	return result, nil
 }

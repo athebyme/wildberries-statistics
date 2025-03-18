@@ -45,7 +45,6 @@ func GetSellerInfo(ctx context.Context, client http.Client, apiKey string, limit
 	return seller, nil
 }
 
-// GetWarehouses retrieves warehouses from Wildberries API.
 func GetWarehouses(ctx context.Context, client *http.Client, apiKey string, limiter *rate.Limiter) ([]models.Warehouse, error) {
 	if err := limiter.Wait(ctx); err != nil {
 		return nil, fmt.Errorf("%w: %v", app_errors.ErrRateLimiter, err)
@@ -76,7 +75,6 @@ func GetWarehouses(ctx context.Context, client *http.Client, apiKey string, limi
 	return warehouses, nil
 }
 
-// GetStocks retrieves stock information from Wildberries API.
 func GetStocks(ctx context.Context, client *http.Client, apiKey string, limiter *rate.Limiter, warehouseID int64, skus []string) (*models.StockResponse, error) {
 	if err := limiter.Wait(ctx); err != nil {
 		return nil, fmt.Errorf("%w: %v", app_errors.ErrRateLimiter, err)
@@ -118,7 +116,6 @@ func GetStocks(ctx context.Context, client *http.Client, apiKey string, limiter 
 	return &stockResponse, nil
 }
 
-// GetPriceHistory retrieves price history from Wildberries API.
 func GetPriceHistory(ctx context.Context, client *http.Client, apiKey string, limiter *rate.Limiter, uploadID int, limit, offset int) (*models.PriceHistoryResponse, error) {
 	if err := limiter.Wait(ctx); err != nil {
 		return nil, fmt.Errorf("%w: %v", app_errors.ErrRateLimiter, err)
@@ -152,16 +149,13 @@ func GetPriceHistory(ctx context.Context, client *http.Client, apiKey string, li
 	return &priceHistoryResponse, nil
 }
 
-// GetGoodsPrices retrieves goods prices from Wildberries API.
 func GetGoodsPrices(ctx context.Context, client *http.Client, apiKey string, limiter *rate.Limiter, limit int, offset int, filterNmID int) (*models.GoodsPricesResponse, error) {
 	if err := limiter.Wait(ctx); err != nil {
 		return nil, fmt.Errorf("%w: %v", app_errors.ErrRateLimiter, err)
 	}
 
-	// Базовый URL
 	baseURL := "https://discounts-prices-api.wildberries.ru/api/v2/list/goods/filter"
 
-	// Формируем URL с параметрами
 	u, err := url.Parse(baseURL)
 	if err != nil {
 		return nil, fmt.Errorf("invalid base URL: %w", err)
@@ -171,36 +165,30 @@ func GetGoodsPrices(ctx context.Context, client *http.Client, apiKey string, lim
 	q.Set("limit", strconv.Itoa(limit))
 	q.Set("offset", strconv.Itoa(offset))
 
-	// Добавляем фильтр по nmID, если указан
 	if filterNmID > 0 {
 		q.Set("filterNmID", strconv.Itoa(filterNmID))
 	}
 
 	u.RawQuery = q.Encode()
 
-	// Создаем запрос
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	if err != nil {
 		return nil, fmt.Errorf("creating request: %w", err)
 	}
 
-	// Добавляем заголовок с API-ключом
 	req.Header.Set("Authorization", "Bearer"+apiKey)
 
-	// Выполняем запрос
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("executing request: %w", err)
 	}
 	defer resp.Body.Close()
 
-	// Проверяем статус ответа
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 		return nil, fmt.Errorf("non-OK status: %d, body: %s", resp.StatusCode, string(body))
 	}
 
-	// Декодируем ответ
 	var result models.GoodsPricesResponse
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return nil, fmt.Errorf("decoding response: %w", err)

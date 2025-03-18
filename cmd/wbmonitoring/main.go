@@ -30,12 +30,10 @@ func main() {
 		log.Fatalf("Failed to create monitoring service: %v", err)
 	}
 
-	// Инициализируем БД
 	if err := service.InitDB(); err != nil {
 		log.Fatalf("Failed to initialize database: %v", err)
 	}
 
-	// Проверяем, нужно ли инициализировать продукты при первом запуске
 	ctx := context.Background()
 	productCount, err := service.GetProductCount(ctx)
 	if err != nil {
@@ -45,7 +43,7 @@ func main() {
 	if productCount == 0 {
 		log.Println("Products table is empty, starting initial product load...")
 		if err := service.UpdateProducts(ctx); err != nil {
-			log.Fatalf("Initial product load failed: %v", err) // Stop if initial load fails critically
+			log.Fatalf("Initial product load failed: %v", err)
 		} else {
 			log.Println("Initial product load completed successfully.")
 		}
@@ -55,12 +53,6 @@ func main() {
 
 	log.Println("Starting Wildberries Monitoring Service")
 
-	//err = service.SendGreetings(ctx)
-	//if err != nil {
-	//	log.Fatalf("Monitoring service stopped with error: %v", err)
-	//}
-
-	// Запускаем мониторинг и product updater
 	go func() {
 		if err := service.RunProductUpdater(ctx); err != nil {
 			log.Fatalf("Product updater stopped with error: %v", err)

@@ -44,6 +44,7 @@ services:
       - SMTP_USER=""       # MailHog не требует авторизации
       - SMTP_PASSWORD=""   # MailHog не требует авторизации
       - SMTP_SSL=false
+      - USE_IMPROVED_SERVICES=true
 
   # База данных для второго приложения
   db-second:
@@ -89,6 +90,7 @@ services:
       - SMTP_USER=""       # MailHog не требует авторизации
       - SMTP_PASSWORD=""   # MailHog не требует авторизации
       - SMTP_SSL=false
+      - USE_IMPROVED_SERVICES=true
 
   mailhog:
     image: mailhog/mailhog:latest
