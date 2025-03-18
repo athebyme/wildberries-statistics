@@ -510,157 +510,75 @@ func addDynamicChangesSheet(
 
 	return nil
 }
+func (b *Bot) sendReportMenu(chatID int64) {
+	msg := tgbotapi.NewMessage(chatID, "Выберите тип отчета:")
+
+	// Создаем inline клавиатуру
+	keyboard := tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("📈 Отчет по ценам", "report_prices"),
+		),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("📦 Отчет по остаткам", "report_stocks"),
+		),
+	)
+
+	msg.ReplyMarkup = keyboard
+	sentMsg, err := b.api.Send(msg)
+	if err == nil {
+		b.trackReportMessage(chatID, sentMsg.MessageID)
+	}
+}
 
 // Обновляем метод генерации и отправки отчетов с использованием новых сервисов
 func (b *Bot) generateReport(chatID int64, reportType, period, format string) {
-	// Отправляем сообщение о начале генерации отчета
-	statusMsg, _ := b.api.Send(tgbotapi.NewMessage(chatID, "Генерация отчета... Пожалуйста, подождите."))
-	defer func() {
-		// Удаляем сообщение о генерации отчета после завершения или ошибки
-		deleteMsg := tgbotapi.NewDeleteMessage(chatID, statusMsg.MessageID)
-		_, err := b.api.Request(deleteMsg)
-		if err != nil {
-			log.Printf("Не удалось удалить сообщение о статусе: %v", err)
-		}
-	}()
-
-	var startDate, endDate time.Time
-	now := time.Now()
-
-	// Определяем даты начала и конца периода
-	switch period {
-	case "day":
-		startDate = time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
-		endDate = now
-	case "week":
-		startDate = now.AddDate(0, 0, -7)
-		endDate = now
-	case "month":
-		startDate = now.AddDate(0, -1, 0)
-		endDate = now
-	default:
-		// Обработка произвольного периода
-		if strings.HasPrefix(period, "custom") {
-			log.Printf("Custom period: %s", period)
-			parts := strings.Split(period, "_")
-			if len(parts) != 3 {
-				b.api.Send(tgbotapi.NewMessage(chatID, "Неверный формат произвольного периода. Пожалуйста, попробуйте еще раз."))
-				return
-			}
-			startDateStr := parts[1]
-			endDateStr := parts[2]
-
-			// Используем формат "02.01.2006"
-			layout := "02.01.2006"
-			var err error
-
-			startDate, err = time.Parse(layout, startDateStr)
-			if err != nil {
-				log.Printf("Ошибка парсинга начальной даты: %v", err)
-				b.api.Send(tgbotapi.NewMessage(chatID, fmt.Sprintf("Неверный формат начальной даты: %v. Используйте формат ДД.ММ.ГГГГ.", err)))
-				return
-			}
-
-			endDate, err = time.Parse(layout, endDateStr)
-			if err != nil {
-				log.Printf("Ошибка парсинга конечной даты: %v", err)
-				b.api.Send(tgbotapi.NewMessage(chatID, fmt.Sprintf("Неверный формат конечной даты: %v. Используйте формат ДД.ММ.ГГГГ.", err)))
-				return
-			}
-
-			if startDate.After(endDate) {
-				b.api.Send(tgbotapi.NewMessage(chatID, "Начальная дата не может быть позже конечной даты."))
-				return
-			}
-		} else {
-			b.api.Send(tgbotapi.NewMessage(chatID, "Неизвестный период. Пожалуйста, выберите корректный период."))
-			return
-		}
+	// Send a progress message
+	progressMsg := tgbotapi.NewMessage(chatID, "Генерация отчета... Пожалуйста, подождите.")
+	sentMsg, err := b.api.Send(progressMsg)
+	if err == nil {
+		b.trackReportMessage(chatID, sentMsg.MessageID)
 	}
 
-	// Генерируем отчет в зависимости от типа и формата
-	var filePath, _ string
-	var err error
-
-	ctx := context.Background()
-
-	if reportType == "prices" {
-		if format == "pdf" {
-			// Используем новый PDF генератор
-			if b.pdfGenerator != nil {
-				filePath, _, err = b.pdfGenerator.GeneratePriceReportPDF(ctx, startDate, endDate, b.config.MinPriceChangePercent)
-			} else {
-				// Используем старый метод, если новый генератор недоступен
-				b.generatePriceReportPDF(chatID, startDate, endDate, b.config)
-				return
-			}
-		} else if format == "excel" {
-			// Используем новый Excel генератор
-			if b.excelGenerator != nil {
-				filePath, _, err = b.excelGenerator.GeneratePriceReportExcel(ctx, startDate, endDate)
-			} else {
-				// Используем старый метод, если новый генератор недоступен
-				b.generatePriceReportExcel(chatID, startDate, endDate, b.config)
-				return
-			}
-		} else {
-			b.api.Send(tgbotapi.NewMessage(chatID, "Неизвестный формат отчета. Пожалуйста, выберите корректный формат."))
-			return
-		}
-	} else if reportType == "stocks" {
-		if format == "pdf" {
-			// Используем новый PDF генератор
-			if b.pdfGenerator != nil {
-				filePath, _, err = b.pdfGenerator.GenerateStockReportPDF(ctx, startDate, endDate, b.config.MinStockChangePercent)
-			} else {
-				// Используем старый метод, если новый генератор недоступен
-				b.generateStockReportPDF(chatID, startDate, endDate, b.config)
-				return
-			}
-		} else if format == "excel" {
-			// Используем новый Excel генератор
-			if b.excelGenerator != nil {
-				filePath, _, err = b.excelGenerator.GenerateStockReportExcel(ctx, startDate, endDate)
-			} else {
-				// Используем старый метод, если новый генератор недоступен
-				b.generateStockReportExcel(chatID, startDate, endDate, b.config)
-				return
-			}
-		} else {
-			b.api.Send(tgbotapi.NewMessage(chatID, "Неизвестный формат отчета. Пожалуйста, выберите корректный формат."))
-			return
-		}
-	} else {
-		b.api.Send(tgbotapi.NewMessage(chatID, "Неизвестный тип отчета. Пожалуйста, выберите корректный тип."))
+	// Generate the report
+	filePath, reportName, err := b.generateReportFile(reportType, period, format)
+	if err != nil {
+		log.Printf("Ошибка при генерации отчета: %v", err)
+		errorMsg := tgbotapi.NewMessage(chatID, fmt.Sprintf("Ошибка при генерации отчета: %v", err))
+		b.api.Send(errorMsg)
 		return
 	}
 
+	// Prepare the report file for sending
+	fileBytes, err := os.ReadFile(filePath)
 	if err != nil {
-		log.Printf("Ошибка генерации отчета: %v", err)
-		b.api.Send(tgbotapi.NewMessage(chatID, fmt.Sprintf("Ошибка при создании отчета: %v", err)))
+		log.Printf("Ошибка при чтении файла отчета: %v", err)
+		errorMsg := tgbotapi.NewMessage(chatID, "Ошибка при подготовке отчета к отправке")
+		b.api.Send(errorMsg)
 		return
 	}
 
-	// Отправляем файл в Telegram
-	doc := tgbotapi.NewDocument(chatID, tgbotapi.FilePath(filePath))
+	// Clean up all previous messages before sending the report
+	b.cleanupReportMessages(chatID)
 
+	// Determine the report type name for the caption
+	var reportTypeName string
 	if reportType == "prices" {
-		doc.Caption = fmt.Sprintf("📈 Отчет по ценам за период %s - %s",
-			startDate.Format("02.01.2006"),
-			endDate.Format("02.01.2006"))
+		reportTypeName = "ценам"
 	} else {
-		doc.Caption = fmt.Sprintf("📦 Отчет по остаткам за период %s - %s",
-			startDate.Format("02.01.2006"),
-			endDate.Format("02.01.2006"))
+		reportTypeName = "остаткам"
 	}
 
-	_, err = b.api.Send(doc)
-	if err != nil {
-		log.Printf("Ошибка отправки файла: %v", err)
-		b.api.Send(tgbotapi.NewMessage(chatID, fmt.Sprintf("Ошибка при отправке файла: %v", err)))
-	}
+	// Create the document message
+	doc := tgbotapi.NewDocument(chatID, tgbotapi.FileBytes{
+		Name:  reportName,
+		Bytes: fileBytes,
+	})
+	doc.Caption = fmt.Sprintf("Отчет по %s за %s", reportTypeName, b.getPeriodName(period))
 
-	// Удаляем временный файл
+	// Send the document
+	b.api.Send(doc)
+
+	// Delete the temporary file
 	os.Remove(filePath)
 }
 

@@ -225,7 +225,7 @@ func (g *ExcelGenerator) GenerateStockReportExcel(ctx context.Context, startDate
 				initialStock := stocks[0].Amount
 				finalStock := stocks[len(stocks)-1].Amount
 
-				// Find min and max stock
+				// Find minimum and maximum stock
 				minStock, maxStock := initialStock, initialStock
 				for _, stock := range stocks {
 					if stock.Amount < minStock {
@@ -726,7 +726,7 @@ func (g *ExcelGenerator) GeneratePriceReportExcel(ctx context.Context, startDate
 			firstPrice := prices[0].Price
 			lastPrice := prices[len(prices)-1].Price
 
-			// Find min and max prices
+			// Find minimum and maximum prices
 			minPrice, maxPrice := firstPrice, firstPrice
 			for _, price := range prices {
 				if price.Price < minPrice {
@@ -932,7 +932,7 @@ func (g *ExcelGenerator) addPriceTrendSheet(ctx context.Context, f *excelize.Fil
 					NewPrice:      newPrice,
 					Change:        priceChange,
 					ChangePercent: changePercent,
-					Discount:      min(newPrice, previousPrice) / max(newPrice, previousPrice) * 10,
+					Discount:      minimum(newPrice, previousPrice) / maximum(newPrice, previousPrice) * 10,
 				})
 			}
 

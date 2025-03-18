@@ -268,7 +268,7 @@ func (g *PDFGenerator) GeneratePriceReportPDF(ctx context.Context, startDate, en
 
 		productsWithSignificantChanges++
 
-		// Find min and max prices
+		// Find minimum and maximum prices
 		minPrice, maxPrice := firstPrice, firstPrice
 		for _, price := range prices {
 			if price.FinalPrice < minPrice {
@@ -781,7 +781,7 @@ func (g *PDFGenerator) GenerateStockReportPDF(ctx context.Context, startDate, en
 				marginBottom := 30.0
 				chartY += 10 // Space before chart
 
-				// Calculate min and max values for Y-axis
+				// Calculate minimum and maximum values for Y-axis
 				minStock, maxStock := dailyTotals[0].Stock, dailyTotals[0].Stock
 				for _, data := range dailyTotals {
 					if data.Stock < minStock {
@@ -792,12 +792,12 @@ func (g *PDFGenerator) GenerateStockReportPDF(ctx context.Context, startDate, en
 					}
 				}
 
-				// Add padding to min/max for better visualization
+				// Add padding to minimum/maximum for better visualization
 				yPadding := int(float64(maxStock-minStock) * 0.1)
 				if yPadding < 1 {
 					yPadding = 1
 				}
-				minStock = max(0, minStock-yPadding)
+				minStock = maximum(0, minStock-yPadding)
 				maxStock += yPadding
 
 				// Draw axes
@@ -832,7 +832,7 @@ func (g *PDFGenerator) GenerateStockReportPDF(ctx context.Context, startDate, en
 				}
 
 				// Add X-axis date labels
-				numXTicks := min(len(dailyTotals), 6)
+				numXTicks := minimum(len(dailyTotals), 6)
 				for i := 0; i < numXTicks; i++ {
 					idx := i
 					if numXTicks > 1 {
@@ -891,16 +891,16 @@ func (g *PDFGenerator) GenerateStockReportPDF(ctx context.Context, startDate, en
 	return filePath, filename, nil
 }
 
-// Helper function for determining min value
-func min(a, b int) int {
+// Helper function for determining minimum value
+func minimum(a, b int) int {
 	if a < b {
 		return a
 	}
 	return b
 }
 
-// Helper function for determining max value
-func max(a, b int) int {
+// Helper function for determining maximum value
+func maximum(a, b int) int {
 	if a > b {
 		return a
 	}

@@ -16,12 +16,13 @@ import (
 
 // Bot представляет Telegram-бота
 type Bot struct {
-	api          *tgbotapi.BotAPI
-	chatID       int64
-	db           *sqlx.DB
-	allowedUsers map[int64]bool
-	config       report.ReportConfig
-	userStates   map[int64]string
+	api              *tgbotapi.BotAPI
+	chatID           int64
+	db               *sqlx.DB
+	allowedUsers     map[int64]bool
+	config           report.ReportConfig
+	userStates       map[int64]string
+	reportMessageIDs map[int64][]int
 
 	emailService   *EmailService
 	pdfGenerator   *report.PDFGenerator
@@ -40,15 +41,14 @@ func NewBot(token string, chatID int64, db *sqlx.DB, allowedUserIDs []int64, con
 	}
 
 	bot := &Bot{
-		api:          api,
-		chatID:       chatID,
-		db:           db,
-		allowedUsers: allowedUsers,
-		config:       config,
-		userStates:   make(map[int64]string),
+		api:              api,
+		chatID:           chatID,
+		db:               db,
+		allowedUsers:     allowedUsers,
+		config:           config,
+		userStates:       make(map[int64]string),
+		reportMessageIDs: make(map[int64][]int),
 
-		// Новые сервисы инициализируются как nil и могут быть установлены позже
-		// через метод UpdateReportServices
 		emailService:   nil,
 		pdfGenerator:   nil,
 		excelGenerator: nil,
@@ -125,6 +125,42 @@ func (b *Bot) sendWelcomeMessage(chatID int64) {
 	b.api.Send(msg)
 }
 
+func (b *Bot) trackReportMessage(chatID int64, messageID int) {
+	if _, exists := b.reportMessageIDs[chatID]; !exists {
+		b.reportMessageIDs[chatID] = make([]int, 0)
+	}
+	b.reportMessageIDs[chatID] = append(b.reportMessageIDs[chatID], messageID)
+}
+
+// Add a method to delete all tracked messages for a chat
+func (b *Bot) cleanupReportMessages(chatID int64) {
+	// Get all message IDs for this chat
+	messageIDs, exists := b.reportMessageIDs[chatID]
+	if !exists || len(messageIDs) == 0 {
+		return
+	}
+
+	// Delete each message
+	for _, msgID := range messageIDs {
+		deleteMsg := tgbotapi.NewDeleteMessage(chatID, msgID)
+		_, err := b.api.Request(deleteMsg)
+		if err != nil {
+			log.Printf("Ошибка при удалении сообщения %d: %v", msgID, err)
+		}
+	}
+
+	// Clear the tracking list
+	b.reportMessageIDs[chatID] = make([]int, 0)
+}
+
+func (b *Bot) sendAndTrackMessage(msg tgbotapi.MessageConfig) (tgbotapi.Message, error) {
+	sentMsg, err := b.api.Send(msg)
+	if err == nil {
+		b.trackReportMessage(msg.ChatID, sentMsg.MessageID)
+	}
+	return sentMsg, err
+}
+
 // sendHelpMessage отправляет сообщение с помощью
 func (b *Bot) sendHelpMessage(chatID int64) {
 	helpText := `Доступные команды:
@@ -155,29 +191,15 @@ func (b *Bot) getMainKeyboard() tgbotapi.ReplyKeyboardMarkup {
 	return keyboard
 }
 
-// sendReportMenu отправляет меню для выбора типа отчета
-func (b *Bot) sendReportMenu(chatID int64) {
-	msg := tgbotapi.NewMessage(chatID, "Выберите тип отчета:")
-
-	// Создаем inline клавиатуру
-	keyboard := tgbotapi.NewInlineKeyboardMarkup(
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("📈 Отчет по ценам", "report_prices"),
-		),
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("📦 Отчет по остаткам", "report_stocks"),
-		),
-	)
-
-	msg.ReplyMarkup = keyboard
-	b.api.Send(msg)
-}
-
 // Обновленная функция handleCallbackQuery
 func (b *Bot) handleCallbackQuery(query *tgbotapi.CallbackQuery) {
 	// Отправляем уведомление о получении запроса
 	callback := tgbotapi.NewCallback(query.ID, "")
 	b.api.Request(callback)
+
+	if query.Message != nil {
+		b.trackReportMessage(query.Message.Chat.ID, query.Message.MessageID)
+	}
 
 	// Обработка отмены ввода
 	if query.Data == "cancel_email_input" {
@@ -365,7 +387,10 @@ func (b *Bot) handleCustomPeriodSelection(chatID int64, reportType string) {
 	msg := tgbotapi.NewMessage(chatID,
 		"Пожалуйста, введите период в формате ДД.ММ.ГГГГ-ДД.ММ.ГГГГ\n"+
 			"Например: 01.01.2023-31.01.2023")
-	b.api.Send(msg)
+	sentMsg, err := b.api.Send(msg)
+	if err == nil {
+		b.trackReportMessage(chatID, sentMsg.MessageID)
+	}
 }
 
 // parseCustomPeriod проверяет и парсит произвольный период
@@ -444,7 +469,10 @@ func (b *Bot) sendPeriodSelection(chatID int64, reportType string) {
 	)
 
 	msg.ReplyMarkup = keyboard
-	b.api.Send(msg)
+	sentMsg, err := b.api.Send(msg)
+	if err == nil {
+		b.trackReportMessage(chatID, sentMsg.MessageID)
+	}
 }
 
 // sendFormatSelection отправляет меню выбора формата отчета
@@ -470,7 +498,10 @@ func (b *Bot) sendFormatSelection(chatID int64, reportType string, period string
 	)
 
 	msg.ReplyMarkup = keyboard
-	b.api.Send(msg)
+	sentMsg, err := b.api.Send(msg)
+	if err == nil {
+		b.trackReportMessage(chatID, sentMsg.MessageID)
+	}
 }
 
 // SendDailyReport отправляет ежедневный отчет по ценам и остаткам в чат
@@ -553,7 +584,6 @@ func (b *Bot) requestEmailInput(chatID int64, reportType string, period string) 
 
 	msg := tgbotapi.NewMessage(chatID, msgText)
 
-	// Создаем клавиатуру с кнопкой отмены
 	keyboard := tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonData("Отмена", "cancel_email_input"),
@@ -561,9 +591,11 @@ func (b *Bot) requestEmailInput(chatID int64, reportType string, period string) 
 	)
 
 	msg.ReplyMarkup = keyboard
-	b.api.Send(msg)
+	sentMsg, err := b.api.Send(msg)
+	if err == nil {
+		b.trackReportMessage(chatID, sentMsg.MessageID)
+	}
 
-	// Сохраняем в состоянии бота, что пользователь сейчас вводит email для этого отчета
 	b.setUserState(chatID, fmt.Sprintf("waiting_email_%s_%s", reportType, period))
 }
 
@@ -571,7 +603,10 @@ func (b *Bot) requestEmailInput(chatID int64, reportType string, period string) 
 func (b *Bot) sendReportToEmail(chatID int64, userID int64, reportType, period, email string) {
 	// Отправляем сообщение о начале генерации отчета
 	msg := tgbotapi.NewMessage(chatID, "Генерирую отчет...")
-	sentMsg, _ := b.api.Send(msg)
+	sentMsg, err := b.api.Send(msg)
+	if err == nil {
+		b.trackReportMessage(chatID, sentMsg.MessageID)
+	}
 
 	// Форматируем период для отображения пользователю
 	displayPeriod := period
@@ -624,6 +659,9 @@ func (b *Bot) sendReportToEmail(chatID int64, userID int64, reportType, period, 
 		return
 	}
 
+	// Clean up all previous messages
+	b.cleanupReportMessages(chatID)
+
 	// Спрашиваем, хочет ли пользователь сохранить email
 	var savedEmail string
 	if b.emailService != nil {
@@ -640,19 +678,21 @@ func (b *Bot) sendReportToEmail(chatID int64, userID int64, reportType, period, 
 			),
 		)
 
-		b.api.Send(tgbotapi.NewEditMessageText(
-			chatID, sentMsg.MessageID,
+		successMsg := tgbotapi.NewMessage(
+			chatID,
 			fmt.Sprintf("Отчет успешно отправлен на %s. Сохранить этот email для будущих отчетов?", email),
-		))
+		)
+		b.api.Send(successMsg)
 
 		msgWithKeyboard := tgbotapi.NewMessage(chatID, "Выберите действие:")
 		msgWithKeyboard.ReplyMarkup = keyboard
 		b.api.Send(msgWithKeyboard)
 	} else {
-		b.api.Send(tgbotapi.NewEditMessageText(
-			chatID, sentMsg.MessageID,
+		successMsg := tgbotapi.NewMessage(
+			chatID,
 			fmt.Sprintf("Отчет успешно отправлен на %s.", email),
-		))
+		)
+		b.api.Send(successMsg)
 	}
 
 	// Удаляем временный файл
@@ -839,45 +879,44 @@ func (b *Bot) generateReportFile(reportType, period, format string) (string, str
 
 // Обновленный метод handleMessage
 func (b *Bot) handleMessage(message *tgbotapi.Message) {
-	// Проверяем, находится ли пользователь в состоянии ожидания ввода произвольного периода
+	// If this is a message related to report generation, track it
 	state := b.getUserState(message.Chat.ID)
+	if strings.HasPrefix(state, "waiting_custom_period_") ||
+		strings.HasPrefix(state, "waiting_email_") {
+		b.trackReportMessage(message.Chat.ID, message.MessageID)
+	}
+
 	if strings.HasPrefix(state, "waiting_custom_period_") {
-		// Извлекаем тип отчета из состояния
 		reportType := strings.TrimPrefix(state, "waiting_custom_period_")
 
-		// Обрабатываем ввод периода
 		startDate, endDate, err := b.parseCustomPeriod(message.Text)
 		if err != nil {
 			msg := tgbotapi.NewMessage(message.Chat.ID, fmt.Sprintf("Ошибка: %s\nПожалуйста, введите период в формате ДД.ММ.ГГГГ-ДД.ММ.ГГГГ", err.Error()))
-			b.api.Send(msg)
+			sentMsg, _ := b.api.Send(msg)
+			b.trackReportMessage(message.Chat.ID, sentMsg.MessageID)
 			return
 		}
 
-		// Форматируем период для использования в callback data
 		periodCode := fmt.Sprintf("custom_%s_%s",
 			startDate.Format("02.01.2006"),
 			endDate.Format("02.01.2006"))
 
-		// Очищаем состояние пользователя
 		b.clearUserState(message.Chat.ID)
 
-		// Отправляем сообщение о выбранном периоде
 		confirmMsg := tgbotapi.NewMessage(message.Chat.ID,
 			fmt.Sprintf("Выбран период с %s по %s",
 				startDate.Format("02.01.2006"),
 				endDate.Format("02.01.2006")))
-		b.api.Send(confirmMsg)
+		sentMsg, _ := b.api.Send(confirmMsg)
+		b.trackReportMessage(message.Chat.ID, sentMsg.MessageID)
 
-		// Отправляем выбор формата для отчета
 		b.sendFormatSelection(message.Chat.ID, reportType, periodCode)
 	} else if strings.HasPrefix(state, "waiting_email_") {
-		// Извлекаем параметры из состояния
 		parts := strings.Split(state, "_")
 		if len(parts) >= 3 {
 			reportType := parts[2]
 			period := parts[3]
 
-			// Проверяем валидность введенного email
 			var isValid bool
 			if b.emailService != nil {
 				isValid = isValidEmail(message.Text)
@@ -891,7 +930,6 @@ func (b *Bot) handleMessage(message *tgbotapi.Message) {
 				return
 			}
 
-			// Отправляем отчет на введенный email
 			b.sendReportToEmail(message.Chat.ID, message.From.ID, reportType, period, message.Text)
 			return
 		}
@@ -904,7 +942,6 @@ func (b *Bot) handleMessage(message *tgbotapi.Message) {
 		case "help":
 			b.sendHelpMessage(message.Chat.ID)
 		default:
-			// Если это не команда, просто отправляем меню отчетов
 			if message.Text != "" {
 				b.sendReportMenu(message.Chat.ID)
 			}
