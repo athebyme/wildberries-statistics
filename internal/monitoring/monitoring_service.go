@@ -1212,8 +1212,8 @@ func (m *Service) CheckPriceChanges(ctx context.Context, product *models.Product
 				"Новая цена: %d руб (скидка %d%%)\n"+
 				"Изменение: %.2f%%",
 			product.Name, product.VendorCode,
-			lastPrice.FinalPrice, lastPrice.Discount,
-			newPrice.FinalPrice, newPrice.Discount,
+			lastPrice.Price, int((1.0-float64(lastPrice.FinalPrice)/float64(lastPrice.Price))*100),
+			newPrice.Price, int((1.0-float64(newPrice.FinalPrice)/float64(newPrice.Price))*100),
 			priceDiff,
 		)
 
