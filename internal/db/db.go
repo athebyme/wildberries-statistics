@@ -439,23 +439,26 @@ func GetBatchStocksForProducts(ctx context.Context, db *sqlx.DB, productIDs []in
 	return result, nil
 }
 
-// GetLatestPricesForProducts получает последние цены для списка продуктов
+// GetLatestPricesForProducts fetches the most recent price records for multiple products
 func GetLatestPricesForProducts(ctx context.Context, db *sqlx.DB, productIDs []int) (map[int]models.PriceRecord, error) {
 	if len(productIDs) == 0 {
 		return make(map[int]models.PriceRecord), nil
 	}
 
-	// Используем оконную функцию для получения последних цен
+	// Use a query that explicitly selects fields we want without the row_number
 	query := `
-        WITH ranked_prices AS (
-            SELECT 
-                p.*,
-                ROW_NUMBER() OVER (PARTITION BY product_id ORDER BY recorded_at DESC) as rn
-            FROM prices p
-            WHERE product_id = ANY($1)
-        )
-        SELECT * FROM ranked_prices WHERE rn = 1
-    `
+		WITH latest_prices AS (
+			SELECT 
+				product_id, 
+				MAX(recorded_at) as latest_time
+			FROM prices
+			WHERE product_id = ANY($1)
+			GROUP BY product_id
+		)
+		SELECT p.* 
+		FROM prices p
+		JOIN latest_prices lp ON p.product_id = lp.product_id AND p.recorded_at = lp.latest_time
+	`
 
 	var prices []models.PriceRecord
 	err := db.SelectContext(ctx, &prices, query, pq.Array(productIDs))
@@ -463,6 +466,7 @@ func GetLatestPricesForProducts(ctx context.Context, db *sqlx.DB, productIDs []i
 		return nil, fmt.Errorf("fetching latest prices: %w", err)
 	}
 
+	// Map results by product ID
 	result := make(map[int]models.PriceRecord)
 	for _, price := range prices {
 		result[price.ProductID] = price
@@ -471,23 +475,30 @@ func GetLatestPricesForProducts(ctx context.Context, db *sqlx.DB, productIDs []i
 	return result, nil
 }
 
-// GetLatestStocksForProducts получает последние остатки для списка продуктов и складов
+// GetLatestStocksForProducts fetches the most recent stock records for multiple products and warehouses
 func GetLatestStocksForProducts(ctx context.Context, db *sqlx.DB, productIDs []int, warehouseIDs []int64) (map[int]map[int64]models.StockRecord, error) {
 	if len(productIDs) == 0 || len(warehouseIDs) == 0 {
 		return make(map[int]map[int64]models.StockRecord), nil
 	}
 
-	// Используем оконную функцию для получения последних остатков
+	// Use a query that explicitly selects fields we want without the row_number
 	query := `
-        WITH ranked_stocks AS (
-            SELECT 
-                s.*,
-                ROW_NUMBER() OVER (PARTITION BY product_id, warehouse_id ORDER BY recorded_at DESC) as rn
-            FROM stocks s
-            WHERE product_id = ANY($1) AND warehouse_id = ANY($2)
-        )
-        SELECT * FROM ranked_stocks WHERE rn = 1
-    `
+		WITH latest_stocks AS (
+			SELECT 
+				product_id, 
+				warehouse_id,
+				MAX(recorded_at) as latest_time
+			FROM stocks
+			WHERE product_id = ANY($1) AND warehouse_id = ANY($2)
+			GROUP BY product_id, warehouse_id
+		)
+		SELECT s.* 
+		FROM stocks s
+		JOIN latest_stocks ls ON 
+			s.product_id = ls.product_id AND 
+			s.warehouse_id = ls.warehouse_id AND 
+			s.recorded_at = ls.latest_time
+	`
 
 	var stocks []models.StockRecord
 	err := db.SelectContext(ctx, &stocks, query, pq.Array(productIDs), pq.Array(warehouseIDs))
@@ -495,6 +506,7 @@ func GetLatestStocksForProducts(ctx context.Context, db *sqlx.DB, productIDs []i
 		return nil, fmt.Errorf("fetching latest stocks: %w", err)
 	}
 
+	// Map results by product ID and warehouse ID
 	result := make(map[int]map[int64]models.StockRecord)
 	for _, stock := range stocks {
 		if _, ok := result[stock.ProductID]; !ok {
