@@ -1023,7 +1023,7 @@ func (s *Service) GetStockChangesWithCursor(ctx context.Context, limit int, curs
 
 	// Фильтрация по складу
 	if filter.WarehouseID != nil {
-		filterConditions = append(filterConditions, fmt.Sprintf("s1.warehouse_id = $%d", argIndex))
+		filterConditions = append(filterConditions, fmt.Sprintf("s2.warehouse_id = $%d", argIndex))
 		filterArgs = append(filterArgs, *filter.WarehouseID)
 		argIndex++
 	}
@@ -1071,7 +1071,7 @@ func (s *Service) GetStockChangesWithCursor(ctx context.Context, limit int, curs
 			FROM 
 				stocks s2
 				JOIN LATERAL (
-					SELECT s1.amount, s1.recorded_at
+					SELECT s1.amount, s1.recorded_at, s1.warehouse_id
 					FROM stocks s1
 					WHERE s1.product_id = s2.product_id
 					AND s1.warehouse_id = s2.warehouse_id
