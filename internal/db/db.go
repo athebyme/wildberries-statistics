@@ -163,6 +163,10 @@ CREATE INDEX IF NOT EXISTS idx_hourly_price_product_time ON hourly_price_data(pr
 
 CREATE INDEX IF NOT EXISTS idx_hourly_stock_product_warehouse_time ON hourly_stock_data(product_id, warehouse_id, hour_timestamp);
 
+CREATE INDEX IF NOT EXISTS idx_stocks_product_warehouse_time ON stocks(product_id, warehouse_id, recorded_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_stocks_time_only ON stocks(recorded_at);
+
 ANALYZE prices;
 ANALYZE stocks;
 ANALYZE price_snapshots;

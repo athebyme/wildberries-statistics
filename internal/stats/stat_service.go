@@ -961,17 +961,22 @@ type PaginatedStockChanges struct {
 	TotalCount int           `json:"totalCount"` // Приблизительное общее количество записей
 }
 
-// GetStockChangesWithCursor возвращает недавние изменения остатков с поддержкой пагинации по курсору
+// GetStockChangesWithCursor - оптимизированная версия
 func (s *Service) GetStockChangesWithCursor(ctx context.Context, limit int, cursor string, filter StockChangeFilter, forceRefresh bool) (*PaginatedStockChanges, error) {
-	// Проверяем и устанавливаем тайм-аут для контекста, если он еще не установлен
-	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	// Устанавливаем разумный таймаут
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
 	if limit <= 0 {
 		limit = 20 // Значение по умолчанию
 	}
 
-	// Формируем ключ кэша на основе параметров фильтрации
+	// Ограничиваем максимальный размер страницы
+	if limit > 100 {
+		limit = 100
+	}
+
+	// Формируем ключ кэша
 	cacheKey := fmt.Sprintf("paginated_stock_changes_%d_%v", limit, filter)
 
 	// Проверяем кэш, если не требуется принудительное обновление и это первая страница
@@ -981,7 +986,7 @@ func (s *Service) GetStockChangesWithCursor(ctx context.Context, limit int, curs
 		}
 	}
 
-	// Разбираем курсор для получения последних значений
+	// Разбираем курсор
 	var lastChangeAmount int
 	var lastDate time.Time
 
@@ -996,237 +1001,120 @@ func (s *Service) GetStockChangesWithCursor(ctx context.Context, limit int, curs
 			return nil, fmt.Errorf("недопустимый формат курсора")
 		}
 
-		// Парсим значения курсора
-		var err1, err2 error
-		lastChangeAmount, err1 = strconv.Atoi(parts[0])
-		lastDateStr := parts[1]
-		lastDate, err2 = time.Parse(time.RFC3339, lastDateStr)
+		lastChangeAmount, err = strconv.Atoi(parts[0])
+		if err != nil {
+			return nil, fmt.Errorf("некорректное значение изменения в курсоре: %w", err)
+		}
 
-		if err1 != nil || err2 != nil {
-			return nil, fmt.Errorf("недопустимые значения курсора")
+		lastDate, err = time.Parse(time.RFC3339, parts[1])
+		if err != nil {
+			return nil, fmt.Errorf("некорректное значение даты в курсоре: %w", err)
 		}
 	}
 
-	// Формируем условия фильтрации
-	var filterConditions []string
-	var filterArgs []interface{}
-	argIndex := 1
-
-	// Начальная дата для фильтрации
+	// Устанавливаем значения фильтров по умолчанию
 	sinceDate := time.Now().AddDate(0, 0, -30) // По умолчанию 30 дней
 	if filter.Since != nil {
 		sinceDate = *filter.Since
 	}
-	filterConditions = append(filterConditions, fmt.Sprintf("s2.recorded_at > $%d", argIndex))
-	filterArgs = append(filterArgs, sinceDate)
-	argIndex++
 
-	// Фильтрация по складу
-	if filter.WarehouseID != nil {
-		filterConditions = append(filterConditions, fmt.Sprintf("s2.warehouse_id = $%d", argIndex))
-		filterArgs = append(filterArgs, *filter.WarehouseID)
-		argIndex++
-	}
-
-	// Фильтрация по минимальному абсолютному изменению
-	minChangeAmt := 10 // По умолчанию минимальное изменение 10 единиц
+	minChangeAmt := 10 // По умолчанию 10 единиц
 	if filter.MinChangeAmount != nil {
 		minChangeAmt = *filter.MinChangeAmount
 	}
 
-	// Фильтрация по минимальному процентному изменению
-	minChangePercent := 20.0 // По умолчанию минимальное изменение 20%
+	minChangePercent := 20.0 // По умолчанию 20%
 	if filter.MinChangePercent != nil {
 		minChangePercent = *filter.MinChangePercent
 	}
 
-	// Объединяем условия фильтрации
-	changeFilterCondition := fmt.Sprintf(
-		"(ABS(((s2.amount - s1.amount)::float / NULLIF(s1.amount, 0)) * 100) >= $%d OR ABS(s2.amount - s1.amount) >= $%d)",
-		argIndex, argIndex+1,
-	)
-	filterConditions = append(filterConditions, changeFilterCondition)
-	filterArgs = append(filterArgs, minChangePercent, minChangeAmt)
-	argIndex += 2
-
-	// Объединяем все условия фильтрации
-	filterWhereClause := strings.Join(filterConditions, " AND ")
-
-	// Формируем оптимизированный запрос с использованием LATERAL JOIN
-	// вместо вложенного подзапроса для лучшей производительности
-	baseQuery := fmt.Sprintf(`
-		WITH latest_records AS (
+	// ОПТИМИЗИРОВАННЫЙ SQL-ЗАПРОС - использует оконные функции вместо сложных джойнов
+	query := `
+		WITH recent_stocks AS (
 			SELECT 
-				s2.product_id,
-				s2.warehouse_id,
-				s2.amount as new_amount,
-				s2.recorded_at as new_date,
-				s1.amount as old_amount,
-				s1.recorded_at as old_date,
-				s2.amount - s1.amount as change_amount,
-				CASE WHEN s1.amount > 0 THEN ((s2.amount - s1.amount)::float / s1.amount) * 100 ELSE 0 END as change_percent,
-				pr.name as product_name,
-				pr.vendor_code,
-				w.name as warehouse_name
-			FROM 
-				stocks s2
-				JOIN LATERAL (
-					SELECT s1.amount, s1.recorded_at, s1.warehouse_id
-					FROM stocks s1
-					WHERE s1.product_id = s2.product_id
-					AND s1.warehouse_id = s2.warehouse_id
-					AND s1.recorded_at < s2.recorded_at
-					ORDER BY s1.recorded_at DESC
-					LIMIT 1
-				) s1 ON true
-				JOIN products pr ON s2.product_id = pr.id
-				JOIN warehouses w ON s2.warehouse_id = w.id
-			WHERE 
-				s2.recorded_at > s1.recorded_at
-				AND %s
+				product_id,
+				warehouse_id,
+				amount,
+				recorded_at,
+				LAG(amount) OVER (PARTITION BY product_id, warehouse_id ORDER BY recorded_at) AS prev_amount,
+				LAG(recorded_at) OVER (PARTITION BY product_id, warehouse_id ORDER BY recorded_at) AS prev_recorded_at
+			FROM stocks
+			WHERE recorded_at >= $1
+			AND ($2::bigint IS NULL OR warehouse_id = $2)
 		),
-		stock_changes AS (
+		significant_changes AS (
 			SELECT 
-				product_id,
-				product_name,
-				vendor_code,
-				warehouse_id,
-				warehouse_name,
-				old_amount,
-				new_amount,
-				change_amount,
-				change_percent,
-				new_date as change_date,
-				ROW_NUMBER() OVER (PARTITION BY product_id, warehouse_id ORDER BY new_date DESC) as rn
+				rs.product_id,
+				p.name as product_name,
+				p.vendor_code,
+				rs.warehouse_id,
+				w.name as warehouse_name,
+				rs.prev_amount as old_amount,
+				rs.amount as new_amount,
+				(rs.amount - rs.prev_amount) as change_amount,
+				CASE WHEN rs.prev_amount > 0 
+					THEN ((rs.amount - rs.prev_amount)::float / rs.prev_amount) * 100 
+					ELSE 0 
+				END as change_percent,
+				rs.recorded_at as change_date
 			FROM 
-				latest_records
-		)
-	`, filterWhereClause)
-
-	// Аргументы для запроса с курсором
-	var args []interface{}
-	args = append(args, filterArgs...)
-
-	// Добавляем условия пагинации
-	var query string
-
-	if cursor == "" {
-		// Первая страница
-		query = baseQuery + `
-			SELECT 
-				product_id,
-				product_name,
-				vendor_code,
-				warehouse_id,
-				warehouse_name,
-				old_amount,
-				new_amount,
-				change_amount,
-				change_percent,
-				change_date
-			FROM 
-				stock_changes
+				recent_stocks rs
+				JOIN products p ON rs.product_id = p.id
+				JOIN warehouses w ON rs.warehouse_id = w.id
 			WHERE 
-				rn = 1
-			ORDER BY 
-				ABS(change_amount) DESC, change_date DESC
-			LIMIT $` + strconv.Itoa(argIndex)
-		args = append(args, limit+1) // +1 чтобы определить, есть ли еще записи
-	} else {
-		// Последующие страницы
-		query = baseQuery + `
-			SELECT 
-				product_id,
-				product_name,
-				vendor_code,
-				warehouse_id,
-				warehouse_name,
-				old_amount,
-				new_amount,
-				change_amount,
-				change_percent,
-				change_date
-			FROM 
-				stock_changes
-			WHERE 
-				rn = 1
+				rs.prev_amount IS NOT NULL
 				AND (
-					ABS(change_amount) < $` + strconv.Itoa(argIndex) + `
-					OR (ABS(change_amount) = $` + strconv.Itoa(argIndex) + ` AND change_date < $` + strconv.Itoa(argIndex+1) + `)
+					ABS(rs.amount - rs.prev_amount) >= $3
+					OR ABS(((rs.amount - rs.prev_amount)::float / NULLIF(rs.prev_amount, 0)) * 100) >= $4
 				)
-			ORDER BY 
-				ABS(change_amount) DESC, change_date DESC
-			LIMIT $` + strconv.Itoa(argIndex+2)
-		args = append(args, math.Abs(float64(lastChangeAmount)), lastDate, limit+1)
-	}
-
-	// Запрос для получения приблизительного количества записей
-	countQuery := `
-		SELECT COUNT(*) FROM (
-			SELECT 1
-			FROM stocks s2
-			JOIN LATERAL (
-				SELECT s1.amount, s1.recorded_at
-				FROM stocks s1
-				WHERE s1.product_id = s2.product_id
-				AND s1.warehouse_id = s2.warehouse_id
-				AND s1.recorded_at < s2.recorded_at
-				ORDER BY s1.recorded_at DESC
-				LIMIT 1
-			) s1 ON true
-			WHERE 
-				s2.recorded_at > s1.recorded_at
-				AND ` + filterWhereClause + `
-			LIMIT 1000
-		) as count_estimate
+		)
+		SELECT * FROM significant_changes sc
 	`
 
-	// Создаем группу вопросов для выполнения запросов параллельно
-	var wg sync.WaitGroup
-	var changes []StockChange
-	var count int
-	var queryErr, countErr error
+	// Добавляем условия пагинации
+	args := []interface{}{sinceDate}
 
-	wg.Add(2)
+	// Преобразуем указатель в значение для запроса
+	var warehouseIDValue *int64
+	if filter.WarehouseID != nil {
+		warehouseIDValue = filter.WarehouseID
+	}
+	args = append(args, warehouseIDValue)
 
-	// Запускаем основной запрос
-	go func() {
-		defer wg.Done()
-		queryErr = s.db.SelectContext(ctx, &changes, query, args...)
-	}()
+	args = append(args, minChangeAmt, minChangePercent)
 
-	// Запускаем запрос счетчика (только для первой страницы)
-	go func() {
-		defer wg.Done()
-		if cursor == "" {
-			countErr = s.db.GetContext(ctx, &count, countQuery, filterArgs...)
-		} else {
-			// Для последующих страниц не делаем запрос счетчика
-			count = 0
-		}
-	}()
-
-	// Ждем завершения обоих запросов
-	wg.Wait()
-
-	// Проверяем ошибки
-	if queryErr != nil {
-		return nil, fmt.Errorf("ошибка получения изменений остатков: %w", queryErr)
+	// Добавляем условия курсора
+	if cursor != "" {
+		query += `
+			WHERE
+				ABS(change_amount) < $5
+				OR (ABS(change_amount) = $5 AND change_date < $6)
+		`
+		args = append(args, math.Abs(float64(lastChangeAmount)), lastDate)
 	}
 
-	if countErr != nil && cursor == "" {
-		log.Printf("Ошибка получения общего количества: %v", countErr)
-		// Продолжаем работу, даже если счетчик не получен
+	// Добавляем сортировку и лимит
+	query += `
+		ORDER BY ABS(change_amount) DESC, change_date DESC
+		LIMIT $` + strconv.Itoa(len(args)+1)
+
+	args = append(args, limit+1) // +1 для определения наличия следующей страницы
+
+	// Выполняем запрос
+	var changes []StockChange
+	err := s.db.SelectContext(ctx, &changes, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("ошибка получения изменений остатков: %w", err)
 	}
 
 	// Определяем, есть ли еще записи
 	hasMore := false
 	if len(changes) > limit {
 		hasMore = true
-		changes = changes[:limit] // Убираем дополнительную запись
+		changes = changes[:limit]
 	}
 
-	// Создаем курсор для следующей страницы, если есть еще записи
+	// Создаем курсор для следующей страницы
 	var nextCursor string
 	if hasMore && len(changes) > 0 {
 		lastItem := changes[len(changes)-1]
@@ -1234,16 +1122,38 @@ func (s *Service) GetStockChangesWithCursor(ctx context.Context, limit int, curs
 		nextCursor = base64.StdEncoding.EncodeToString([]byte(cursorStr))
 	}
 
-	// Устанавливаем расчетное общее количество
-	totalCount := count
-	if cursor != "" {
-		// Для последующих страниц используем приблизительное значение
-		if cachedData, found := s.cache.Get(cacheKey); found {
-			totalCount = cachedData.(*PaginatedStockChanges).TotalCount
+	// Получаем приблизительное количество записей (только для первой страницы)
+	totalCount := 0
+	if cursor == "" {
+		countQuery := `
+			SELECT COUNT(*) FROM (
+				SELECT 1
+				FROM stocks s1
+				JOIN stocks s2 ON s1.product_id = s2.product_id AND s1.warehouse_id = s2.warehouse_id
+				WHERE s1.recorded_at < s2.recorded_at
+				AND s2.recorded_at >= $1
+				AND ($2::bigint IS NULL OR s1.warehouse_id = $2)
+				AND (
+					ABS(s2.amount - s1.amount) >= $3
+					OR ABS(((s2.amount - s1.amount)::float / NULLIF(s1.amount, 0)) * 100) >= $4
+				)
+				LIMIT 1000
+			) AS count_estimate
+		`
+
+		// Используем те же аргументы, что и для основного запроса (без курсора)
+		countArgs := args[:4]
+
+		err := s.db.GetContext(ctx, &totalCount, countQuery, countArgs...)
+		if err != nil {
+			log.Printf("Ошибка получения общего количества: %v", err)
+			// Продолжаем работу без счетчика
 		}
+	} else if cachedData, found := s.cache.Get(cacheKey); found {
+		totalCount = cachedData.(*PaginatedStockChanges).TotalCount
 	}
 
-	// Создаем результат с пагинацией
+	// Создаем результат
 	result := &PaginatedStockChanges{
 		Items:      changes,
 		NextCursor: nextCursor,
@@ -1253,7 +1163,7 @@ func (s *Service) GetStockChangesWithCursor(ctx context.Context, limit int, curs
 
 	// Кэшируем только первую страницу
 	if cursor == "" {
-		s.cache.SetWithTTL(cacheKey, result, 5*time.Minute) // Сокращаем время кэширования для свежих данных
+		s.cache.SetWithTTL(cacheKey, result, 5*time.Minute)
 	}
 
 	return result, nil
