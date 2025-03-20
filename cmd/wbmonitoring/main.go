@@ -3,9 +3,16 @@ package main
 import (
 	"context"
 	"errors"
+	"github.com/gorilla/mux"
 	"log"
+	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
 	"wbmonitoring/monitoring/internal/config"
 	"wbmonitoring/monitoring/internal/monitoring"
+	"wbmonitoring/monitoring/internal/stats"
 )
 
 func main() {
@@ -34,7 +41,9 @@ func main() {
 		log.Fatalf("Failed to initialize database: %v", err)
 	}
 
-	ctx := context.Background()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
 	productCount, err := service.GetProductCount(ctx)
 	if err != nil {
 		log.Fatalf("Failed to check product count: %v", err)
@@ -53,13 +62,65 @@ func main() {
 
 	log.Println("Starting Wildberries Monitoring Service")
 
+	// Запускаем мониторинг в фоновом режиме
 	go func() {
-		if err := service.RunProductUpdater(ctx); err != nil {
+		if err := service.RunProductUpdater(ctx); err != nil && !errors.Is(err, context.Canceled) {
 			log.Fatalf("Product updater stopped with error: %v", err)
 		}
 	}()
 
-	if err := service.RunMonitoring(ctx); err != nil && !errors.Is(err, context.Canceled) {
-		log.Fatalf("Monitoring service stopped with error: %v", err)
+	go func() {
+		if err := service.RunMonitoring(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			log.Fatalf("Monitoring service stopped with error: %v", err)
+		}
+	}()
+
+	// Создаем и настраиваем веб-сервер
+	router := mux.NewRouter()
+
+	// Инициализируем обработчики статистики
+	statsHandlers := stats.NewHandlers(service.GetDB())
+
+	// Регистрируем маршруты для статистики
+	statsHandlers.RegisterRoutes(router)
+
+	// Статические файлы
+	fs := http.FileServer(http.Dir("./public"))
+	router.PathPrefix("/src/").Handler(http.StripPrefix("/src/", fs))
+
+	// Настройка сервера
+	srv := &http.Server{
+		Addr:         ":8080",
+		Handler:      router,
+		ReadTimeout:  15 * time.Second,
+		WriteTimeout: 15 * time.Second,
+		IdleTimeout:  60 * time.Second,
 	}
+
+	// Запуск сервера в горутине
+	go func() {
+		log.Println("Запуск веб-сервера на порту :8080")
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("Ошибка при запуске сервера: %v", err)
+		}
+	}()
+
+	// Ожидание сигнала для завершения
+	c := make(chan os.Signal, 1)
+	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
+	<-c
+
+	// Создаем контекст с таймаутом для graceful shutdown
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer shutdownCancel()
+
+	// Завершаем работу сервера
+	log.Println("Завершение работы сервера...")
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		log.Fatalf("Ошибка при завершении работы сервера: %v", err)
+	}
+
+	// Отменяем контекст мониторинга
+	cancel()
+	log.Println("Сервер успешно остановлен")
 }

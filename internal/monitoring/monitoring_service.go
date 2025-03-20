@@ -1323,3 +1323,7 @@ func (m *Service) UpdatePriceCheckStatus(ctx context.Context, productID int) err
 func (m *Service) UpdateStockCheckStatus(ctx context.Context, productID int) error {
 	return db.UpdateStockCheckStatus(ctx, m.db, productID)
 }
+
+func (m *Service) GetDB() *sqlx.DB {
+	return m.db
+}
