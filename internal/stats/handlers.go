@@ -36,6 +36,10 @@ func (h *Handlers) RegisterRoutes(router *mux.Router) {
 	statsAPI.HandleFunc("/products", h.GetTopProducts).Methods("GET")
 	statsAPI.HandleFunc("/price-changes", h.GetPriceChanges).Methods("GET")
 	statsAPI.HandleFunc("/stock-changes", h.GetStockChanges).Methods("GET")
+
+	// Добавляем новый маршрут для пагинированных запросов
+	statsAPI.HandleFunc("/stock-changes/paginated", h.GetStockChangesWithPagination).Methods("GET")
+
 	statsAPI.HandleFunc("/price-history/{id}", h.GetPriceHistory).Methods("GET")
 	statsAPI.HandleFunc("/stock-history/{id}/{warehouseId}", h.GetStockHistory).Methods("GET")
 
