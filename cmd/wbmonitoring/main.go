@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"errors"
-	"github.com/gorilla/mux"
 	"log"
 	"net/http"
 	"os"
@@ -13,6 +12,8 @@ import (
 	"wbmonitoring/monitoring/internal/config"
 	"wbmonitoring/monitoring/internal/monitoring"
 	"wbmonitoring/monitoring/internal/stats"
+
+	"github.com/gorilla/mux"
 )
 
 func main() {
@@ -30,6 +31,24 @@ func main() {
 
 	if cfg.TelegramChatID == 0 {
 		log.Fatal("TELEGRAM_CHAT_ID environment variable is required")
+	}
+
+	// Получаем порт из переменных окружения или используем порт по умолчанию
+	port := os.Getenv("SERVER_PORT")
+	if port == "" {
+		port = "8080" // Порт по умолчанию
+	}
+
+	// Получаем базовый путь для API из переменных окружения
+	basePath := os.Getenv("API_BASE_PATH")
+	if basePath == "" {
+		basePath = "" // Пустой префикс по умолчанию
+	}
+
+	// Получаем идентификатор этого экземпляра
+	instanceID := os.Getenv("INSTANCE_ID")
+	if instanceID == "" {
+		instanceID = "default"
 	}
 
 	service, err := monitoring.NewMonitoringService(cfg)
@@ -60,7 +79,7 @@ func main() {
 		log.Printf("Products table already contains %d products. Skipping initial load.", productCount)
 	}
 
-	log.Println("Starting Wildberries Monitoring Service")
+	log.Printf("Starting Wildberries Monitoring Service (Instance: %s)", instanceID)
 
 	// Запускаем мониторинг в фоновом режиме
 	go func() {
@@ -78,19 +97,35 @@ func main() {
 	// Создаем и настраиваем веб-сервер
 	router := mux.NewRouter()
 
+	// Создаем подроутер с базовым путем, если он указан
+	var apiRouter *mux.Router
+	if basePath != "" {
+		apiRouter = router.PathPrefix("/" + basePath).Subrouter()
+		log.Printf("API будет доступен по базовому пути: /%s", basePath)
+	} else {
+		apiRouter = router
+	}
+
 	// Инициализируем обработчики статистики
 	statsHandlers := stats.NewHandlers(service.GetDB())
 
 	// Регистрируем маршруты для статистики
-	statsHandlers.RegisterRoutes(router)
+	statsHandlers.RegisterRoutes(apiRouter)
 
-	// Статические файлы
+	// Статические файлы размещаем на базовом уровне
 	fs := http.FileServer(http.Dir("./public"))
-	router.PathPrefix("/src/").Handler(http.StripPrefix("/src/", fs))
+
+	// Если есть базовый путь, статика доступна как с базовым путем, так и без него
+	if basePath != "" {
+		router.PathPrefix("/src/").Handler(http.StripPrefix("/src/", fs))
+		apiRouter.PathPrefix("/src/").Handler(http.StripPrefix("/"+basePath+"/src/", fs))
+	} else {
+		router.PathPrefix("/src/").Handler(http.StripPrefix("/src/", fs))
+	}
 
 	// Настройка сервера
 	srv := &http.Server{
-		Addr:         ":8080",
+		Addr:         ":" + port,
 		Handler:      router,
 		ReadTimeout:  15 * time.Second,
 		WriteTimeout: 15 * time.Second,
@@ -99,7 +134,7 @@ func main() {
 
 	// Запуск сервера в горутине
 	go func() {
-		log.Println("Запуск веб-сервера на порту :8080")
+		log.Printf("Запуск веб-сервера на порту :%s (Instance: %s)", port, instanceID)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("Ошибка при запуске сервера: %v", err)
 		}
@@ -122,5 +157,5 @@ func main() {
 
 	// Отменяем контекст мониторинга
 	cancel()
-	log.Println("Сервер успешно остановлен")
+	log.Printf("Сервер успешно остановлен (Instance: %s)", instanceID)
 }
