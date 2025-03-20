@@ -607,16 +607,16 @@ func (s *Service) GetRecentPriceChanges(ctx context.Context, limit int, forceRef
 
 // StockChange представляет значительное изменение остатков
 type StockChange struct {
-	ProductID     int       `json:"productId"`
-	ProductName   string    `json:"productName"`
-	VendorCode    string    `json:"vendorCode"`
-	WarehouseID   int64     `json:"warehouseId"`
-	WarehouseName string    `json:"warehouseName"`
-	OldAmount     int       `json:"oldAmount"`
-	NewAmount     int       `json:"newAmount"`
-	ChangeAmount  int       `json:"changeAmount"`
-	ChangePercent float64   `json:"changePercent"`
-	Date          time.Time `json:"date"`
+	ProductID     int       `json:"productId" db:"product_id"`
+	ProductName   string    `json:"productName" db:"product_name"`
+	VendorCode    string    `json:"vendorCode" db:"vendor_code"`
+	WarehouseID   int64     `json:"warehouseId" db:"warehouse_id"`
+	WarehouseName string    `json:"warehouseName" db:"warehouse_name"`
+	OldAmount     int       `json:"oldAmount" db:"old_amount"`
+	NewAmount     int       `json:"newAmount" db:"new_amount"`
+	ChangeAmount  int       `json:"changeAmount" db:"change_amount"`
+	ChangePercent float64   `json:"changePercent" db:"change_percent"`
+	Date          time.Time `json:"date" db:"change_date"`
 }
 
 // GetRecentStockChanges возвращает недавние значительные изменения остатков
