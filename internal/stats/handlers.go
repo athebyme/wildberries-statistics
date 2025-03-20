@@ -126,7 +126,7 @@ func (h *Handlers) GetOverviewStats(w http.ResponseWriter, r *http.Request) {
 
 // RefreshCacheHandler принудительно обновляет кэш статистики
 func (h *Handlers) RefreshCacheHandler(w http.ResponseWriter, r *http.Request) {
-	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	_, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
 
 	// Получаем тип обновления из параметров запроса
