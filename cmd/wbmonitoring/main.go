@@ -94,10 +94,8 @@ func main() {
 		}
 	}()
 
-	// Создаем и настраиваем веб-сервер
 	router := mux.NewRouter()
 
-	// Создаем подроутер с базовым путем, если он указан
 	var apiRouter *mux.Router
 	if basePath != "" {
 		apiRouter = router.PathPrefix("/" + basePath).Subrouter()
@@ -106,16 +104,12 @@ func main() {
 		apiRouter = router
 	}
 
-	// Инициализируем обработчики статистики
 	statsHandlers := stats.NewHandlers(service.GetDB())
 
-	// Регистрируем маршруты для статистики
 	statsHandlers.RegisterRoutes(apiRouter)
 
-	// Статические файлы размещаем на базовом уровне
 	fs := http.FileServer(http.Dir("./public"))
 
-	// Если есть базовый путь, статика доступна как с базовым путем, так и без него
 	if basePath != "" {
 		router.PathPrefix("/src/").Handler(http.StripPrefix("/src/", fs))
 		apiRouter.PathPrefix("/src/").Handler(http.StripPrefix("/"+basePath+"/src/", fs))
@@ -123,7 +117,6 @@ func main() {
 		router.PathPrefix("/src/").Handler(http.StripPrefix("/src/", fs))
 	}
 
-	// Настройка сервера
 	srv := &http.Server{
 		Addr:         ":" + port,
 		Handler:      router,
@@ -132,7 +125,6 @@ func main() {
 		IdleTimeout:  60 * time.Second,
 	}
 
-	// Запуск сервера в горутине
 	go func() {
 		log.Printf("Запуск веб-сервера на порту :%s (Instance: %s)", port, instanceID)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
@@ -140,22 +132,18 @@ func main() {
 		}
 	}()
 
-	// Ожидание сигнала для завершения
 	c := make(chan os.Signal, 1)
 	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
 	<-c
 
-	// Создаем контекст с таймаутом для graceful shutdown
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer shutdownCancel()
 
-	// Завершаем работу сервера
 	log.Println("Завершение работы сервера...")
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		log.Fatalf("Ошибка при завершении работы сервера: %v", err)
 	}
 
-	// Отменяем контекст мониторинга
 	cancel()
 	log.Printf("Сервер успешно остановлен (Instance: %s)", instanceID)
 }

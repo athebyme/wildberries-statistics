@@ -70,11 +70,21 @@ func (h *Handlers) RegisterAPIRoutes(router *mux.Router) {
 
 	statsAPI.HandleFunc("/overview", h.GetOverviewStats).Methods("GET")
 	statsAPI.HandleFunc("/products", h.GetTopProducts).Methods("GET")
+
+	// Стандартный обработчик изменений цен (для обратной совместимости)
 	statsAPI.HandleFunc("/price-changes", h.GetPriceChanges).Methods("GET")
+
+	// Новые обработчики с пагинацией
+	statsAPI.HandleFunc("/price-changes/paginated", h.GetPriceChangesWithPagination).Methods("GET")
+
 	statsAPI.HandleFunc("/stock-changes", h.GetStockChanges).Methods("GET")
+	statsAPI.HandleFunc("/stock-changes/paginated", h.GetStockChangesWithPagination).Methods("GET")
 	statsAPI.HandleFunc("/price-history/{id}", h.GetPriceHistory).Methods("GET")
 	statsAPI.HandleFunc("/stock-history/{id}/{warehouseId}", h.GetStockHistory).Methods("GET")
 	statsAPI.HandleFunc("/warehouses", h.GetWarehouses).Methods("GET")
+
+	// Маршрут для принудительного обновления кэша
+	statsAPI.HandleFunc("/refresh-cache", h.RefreshCacheHandler).Methods("POST")
 
 	log.Println("Зарегистрированы API маршруты статистики")
 }
@@ -112,6 +122,47 @@ func (h *Handlers) GetOverviewStats(w http.ResponseWriter, r *http.Request) {
 	}
 
 	sendJSONResponse(w, stats)
+}
+
+// RefreshCacheHandler принудительно обновляет кэш статистики
+func (h *Handlers) RefreshCacheHandler(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+
+	// Получаем тип обновления из параметров запроса
+	refreshType := r.URL.Query().Get("type")
+
+	// Проверяем, что запрос содержит секретный ключ для авторизации
+	// (Простой механизм защиты, в реальности это должно быть заменено на настоящую аутентификацию)
+	apiKey := r.Header.Get("X-API-Key")
+	if apiKey != "your-secret-api-key" { // В реальном приложении замените на безопасное значение
+		http.Error(w, "Неверный ключ API", http.StatusUnauthorized)
+		return
+	}
+
+	// В зависимости от типа обновляем разные части кэша
+	switch refreshType {
+	case "paginated":
+		// Обновляем только пагинированные данные
+		go h.service.RefreshPaginatedCache(context.Background())
+	case "full":
+		// Обновляем весь кэш
+		go h.service.RefreshCache(context.Background())
+	default:
+		// По умолчанию обновляем весь кэш
+		go h.service.RefreshCache(context.Background())
+	}
+
+	// Отправляем ответ
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+
+	response := map[string]interface{}{
+		"success": true,
+		"message": "Обновление кэша запущено",
+	}
+
+	json.NewEncoder(w).Encode(response)
 }
 
 // GetTopProducts возвращает список топовых продуктов как API
@@ -278,6 +329,123 @@ func (h *Handlers) GetStockHistory(w http.ResponseWriter, r *http.Request) {
 	}
 
 	sendJSONResponse(w, history)
+}
+
+// GetPriceChangesWithPagination возвращает недавние изменения цен с поддержкой пагинации
+func (h *Handlers) GetPriceChangesWithPagination(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second) // Увеличиваем таймаут до 10 секунд
+	defer cancel()
+
+	// Получаем параметры запроса
+	limitStr := r.URL.Query().Get("limit")
+	cursor := r.URL.Query().Get("cursor")
+	refresh := r.URL.Query().Get("refresh") == "true"
+
+	limit := 20 // Значение по умолчанию
+	if limitStr != "" {
+		parsedLimit, err := strconv.Atoi(limitStr)
+		if err == nil && parsedLimit > 0 {
+			limit = parsedLimit
+		}
+	}
+
+	// Ограничиваем максимальный размер страницы
+	if limit > 100 {
+		limit = 100
+	}
+
+	// Получаем данные с пагинацией
+	result, err := h.service.GetPriceChangesWithCursor(ctx, limit, cursor, refresh)
+	if err != nil {
+		log.Printf("Ошибка при получении изменений цен с пагинацией: %v", err)
+		http.Error(w, "Ошибка при получении изменений цен", http.StatusInternalServerError)
+		return
+	}
+
+	sendJSONResponse(w, result)
+}
+
+// GetStockChangesWithPagination возвращает недавние изменения остатков с поддержкой пагинации и фильтрации
+func (h *Handlers) GetStockChangesWithPagination(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second) // Увеличиваем таймаут до 15 секунд
+	defer cancel()
+
+	// Получаем параметры запроса
+	limitStr := r.URL.Query().Get("limit")
+	cursor := r.URL.Query().Get("cursor")
+	refresh := r.URL.Query().Get("refresh") == "true"
+
+	// Параметры фильтрации
+	warehouseIDStr := r.URL.Query().Get("warehouseId")
+	minChangeAmountStr := r.URL.Query().Get("minChangeAmount")
+	minChangePercentStr := r.URL.Query().Get("minChangePercent")
+	sinceStr := r.URL.Query().Get("since") // Формат: YYYY-MM-DD
+
+	limit := 20 // Значение по умолчанию
+	if limitStr != "" {
+		parsedLimit, err := strconv.Atoi(limitStr)
+		if err == nil && parsedLimit > 0 {
+			limit = parsedLimit
+		}
+	}
+
+	// Ограничиваем максимальный размер страницы
+	if limit > 100 {
+		limit = 100
+	}
+
+	// Создаем объект фильтра
+	filter := StockChangeFilter{}
+
+	// Парсим warehouse_id
+	if warehouseIDStr != "" {
+		warehouseID, err := strconv.ParseInt(warehouseIDStr, 10, 64)
+		if err == nil {
+			filter.WarehouseID = &warehouseID
+		} else {
+			log.Printf("Ошибка парсинга warehouse_id: %v", err)
+		}
+	}
+
+	// Парсим минимальное абсолютное изменение
+	if minChangeAmountStr != "" {
+		minChangeAmount, err := strconv.Atoi(minChangeAmountStr)
+		if err == nil && minChangeAmount > 0 {
+			filter.MinChangeAmount = &minChangeAmount
+		} else {
+			log.Printf("Ошибка парсинга min_change_amount: %v", err)
+		}
+	}
+
+	// Парсим минимальное процентное изменение
+	if minChangePercentStr != "" {
+		minChangePercent, err := strconv.ParseFloat(minChangePercentStr, 64)
+		if err == nil && minChangePercent > 0 {
+			filter.MinChangePercent = &minChangePercent
+		} else {
+			log.Printf("Ошибка парсинга min_change_percent: %v", err)
+		}
+	}
+
+	// Парсим дату начала периода
+	if sinceStr != "" {
+		since, err := time.Parse("2006-01-02", sinceStr)
+		if err == nil {
+			filter.Since = &since
+		} else {
+			log.Printf("Ошибка парсинга даты since: %v", err)
+		}
+	}
+
+	// Получаем данные с пагинацией и фильтрацией
+	result, err := h.service.GetStockChangesWithCursor(ctx, limit, cursor, filter, refresh)
+	if err != nil {
+		log.Printf("Ошибка при получении изменений остатков с пагинацией: %v", err)
+		http.Error(w, "Ошибка при получении изменений остатков", http.StatusInternalServerError)
+		return
+	}
+
+	sendJSONResponse(w, result)
 }
 
 // sendJSONResponse отправляет JSON-ответ клиенту
