@@ -168,10 +168,24 @@ CREATE INDEX IF NOT EXISTS idx_stocks_product_warehouse_time ON stocks(product_i
 
 CREATE INDEX IF NOT EXISTS idx_stocks_time_only ON stocks(recorded_at);
 
+-- Базовые индексы для быстрого поиска
 CREATE INDEX IF NOT EXISTS idx_prices_product_date_composite ON prices(product_id, recorded_at);
 CREATE INDEX IF NOT EXISTS idx_stocks_product_warehouse_date_composite ON stocks(product_id, warehouse_id, recorded_at);
-CREATE INDEX IF NOT EXISTS idx_prices_day_trunc ON prices(product_id, DATE_TRUNC('day', recorded_at));
-CREATE INDEX IF NOT EXISTS idx_stocks_day_trunc ON stocks(product_id, warehouse_id, DATE_TRUNC('day', recorded_at));
+
+-- Индексы для сортировки и фильтрации
+CREATE INDEX IF NOT EXISTS idx_prices_product_id_recorded_at ON prices(product_id, recorded_at DESC);
+CREATE INDEX IF NOT EXISTS idx_stocks_product_id_warehouse_id_recorded_at ON stocks(product_id, warehouse_id, recorded_at DESC);
+
+-- Индекс для запросов по временным диапазонам
+CREATE INDEX IF NOT EXISTS idx_prices_recorded_at_range ON prices(recorded_at) WHERE recorded_at > current_date - interval '90 days';
+CREATE INDEX IF NOT EXISTS idx_stocks_recorded_at_range ON stocks(recorded_at) WHERE recorded_at > current_date - interval '90 days';
+
+-- Индексы для эффективной фильтрации по складам
+CREATE INDEX IF NOT EXISTS idx_stocks_warehouse_date ON stocks(warehouse_id, recorded_at);
+
+-- Индексы для поддержки оконных функций
+CREATE INDEX IF NOT EXISTS idx_prices_product_price_date ON prices(product_id, price, recorded_at);
+CREATE INDEX IF NOT EXISTS idx_stocks_product_warehouse_amount_date ON stocks(product_id, warehouse_id, amount, recorded_at);
 
 
 ALTER SYSTEM SET work_mem = '32MB';         -- Увеличить память для операций сортировки
