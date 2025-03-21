@@ -901,10 +901,7 @@ func (s *Service) GetPriceChangesWithCursor(ctx context.Context, limit int, curs
 		}
 	}
 
-	// Оптимизированный запрос - объединяем всё в один запрос с оконными функциями
-	var query string
-	var args []interface{}
-
+	// Оптимизированный запрос - базовая часть запроса с оконными функциями
 	baseQuery := `
         WITH recent_prices AS (
             SELECT 
@@ -934,6 +931,9 @@ func (s *Service) GetPriceChangesWithCursor(ctx context.Context, limit int, curs
             ORDER BY product_id, ABS(change_percent) DESC
         )
     `
+
+	var query string
+	var args []interface{}
 
 	if cursor == "" {
 		// Запрос для первой страницы
@@ -1034,7 +1034,9 @@ type PaginatedStockChanges struct {
 	TotalCount int           `json:"totalCount"` // Приблизительное общее количество записей
 }
 
-// Дополнительная оптимизация для метода GetStockChangesWithCursor
+// Updated GetStockChangesWithCursor method in internal/stats/stat_service.go
+// that fixes the "column 'change_percent' does not exist" error
+
 func (s *Service) GetStockChangesWithCursor(ctx context.Context, limit int, cursor string, filter StockChangeFilter, forceRefresh bool) (*PaginatedStockChanges, error) {
 	// Устанавливаем короткий таймаут для ускорения ответа
 	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
@@ -1117,7 +1119,7 @@ func (s *Service) GetStockChangesWithCursor(ctx context.Context, limit int, curs
 
 	// Оптимизированный SQL-запрос с использованием оконных функций
 	// для ускорения и уменьшения количества строк
-	query := `
+	baseQuery := `
         WITH recent_stocks AS (
             SELECT 
                 product_id,
@@ -1151,8 +1153,27 @@ func (s *Service) GetStockChangesWithCursor(ctx context.Context, limit int, curs
                     OR ABS(((amount - prev_amount)::float / NULLIF(prev_amount, 0)) * 100) >= $4
                 )
             ORDER BY product_id, warehouse_id, ABS(change_percent) DESC
-        ),
-        filtered_changes AS (
+        )
+    `
+
+	// Базовые аргументы для всех запросов
+	args := []interface{}{sinceDate}
+
+	// Добавляем warehouse_id если он есть
+	var warehouseIDValue *int64
+	if filter.WarehouseID != nil {
+		warehouseIDValue = filter.WarehouseID
+	}
+	args = append(args, warehouseIDValue)
+
+	// Добавляем минимальные пороги изменений
+	args = append(args, minChangeAmt, minChangePercent)
+
+	// Формируем запрос в зависимости от наличия курсора
+	var query string
+	if cursor == "" {
+		// Запрос для первой страницы
+		query = baseQuery + `
             SELECT
                 sc.product_id,
                 p.name as product_name,
@@ -1167,39 +1188,35 @@ func (s *Service) GetStockChangesWithCursor(ctx context.Context, limit int, curs
             FROM significant_changes sc
             JOIN products p ON sc.product_id = p.id
             JOIN warehouses w ON sc.warehouse_id = w.id
-        )
-        SELECT * FROM filtered_changes
-    `
-
-	// Добавляем параметры запроса
-	args := []interface{}{sinceDate}
-
-	// Добавляем warehouse_id если он есть
-	var warehouseIDValue *int64
-	if filter.WarehouseID != nil {
-		warehouseIDValue = filter.WarehouseID
-	}
-	args = append(args, warehouseIDValue)
-
-	// Добавляем минимальные пороги изменений
-	args = append(args, minChangeAmt, minChangePercent)
-
-	// Добавляем условия курсора
-	if cursor != "" {
-		query += `
-            WHERE
-                ABS(change_percent) < $5
-                OR (ABS(change_percent) = $5 AND change_date < $6)
+            ORDER BY ABS(sc.change_percent) DESC, sc.change_date DESC
+            LIMIT $5
         `
-		args = append(args, math.Abs(lastChangePercent), lastDate)
+		args = append(args, limit+1) // +1 для определения наличия следующей страницы
+	} else {
+		// Запрос для последующих страниц с использованием курсора
+		query = baseQuery + `
+            SELECT
+                sc.product_id,
+                p.name as product_name,
+                p.vendor_code,
+                sc.warehouse_id,
+                w.name as warehouse_name,
+                sc.old_amount,
+                sc.new_amount,
+                sc.change_amount,
+                sc.change_percent,
+                sc.change_date
+            FROM significant_changes sc
+            JOIN products p ON sc.product_id = p.id
+            JOIN warehouses w ON sc.warehouse_id = w.id
+            WHERE 
+                ABS(sc.change_percent) < $5
+                OR (ABS(sc.change_percent) = $5 AND sc.change_date < $6)
+            ORDER BY ABS(sc.change_percent) DESC, sc.change_date DESC
+            LIMIT $7
+        `
+		args = append(args, math.Abs(lastChangePercent), lastDate, limit+1)
 	}
-
-	// Добавляем сортировку по проценту изменения (приоритет) и дате
-	query += `
-        ORDER BY ABS(change_percent) DESC, change_date DESC
-        LIMIT $` + strconv.Itoa(len(args)+1)
-
-	args = append(args, limit+1) // +1 для определения наличия следующей страницы
 
 	// Запускаем запрос с логированием производительности
 	startTime := time.Now()
@@ -1208,6 +1225,7 @@ func (s *Service) GetStockChangesWithCursor(ctx context.Context, limit int, curs
 	queryTime := time.Since(startTime)
 
 	if err != nil {
+		log.Printf("Ошибка запроса изменений остатков с пагинацией: %v", err)
 		return nil, fmt.Errorf("ошибка получения изменений остатков: %w", err)
 	}
 
