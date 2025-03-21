@@ -9,6 +9,7 @@ import (
 	"golang.org/x/time/rate"
 	"log"
 	"net/http"
+	"sort"
 	"time"
 	"wbmonitoring/monitoring/internal/api"
 	"wbmonitoring/monitoring/internal/app_errors"
@@ -389,6 +390,119 @@ func GetAllWarehouses(ctx context.Context, db *sqlx.DB) ([]models.Warehouse, err
 	return warehouses, nil
 }
 
+func GetBatchPricesForProductsPaginated(ctx context.Context, db *sqlx.DB, productIDs []int,
+	startDate, endDate time.Time, pageSize int) (map[int][]models.PriceRecord, error) {
+
+	if len(productIDs) == 0 {
+		return make(map[int][]models.PriceRecord), nil
+	}
+
+	result := make(map[int][]models.PriceRecord)
+
+	// Process in batches to avoid overwhelming the database
+	for i := 0; i < len(productIDs); i += pageSize {
+		end := i + pageSize
+		if end > len(productIDs) {
+			end = len(productIDs)
+		}
+
+		batchIDs := productIDs[i:end]
+
+		query := `
+            WITH daily_prices AS (
+                SELECT DISTINCT ON (product_id, DATE_TRUNC('day', recorded_at))
+                    id, product_id, size_id, price, discount, club_discount, final_price, 
+                    club_final_price, currency_iso_code, tech_size_name, editable_size_price, recorded_at
+                FROM prices
+                WHERE product_id = ANY($1)
+                AND recorded_at BETWEEN $2 AND $3
+                ORDER BY product_id, DATE_TRUNC('day', recorded_at), recorded_at DESC
+            )
+            SELECT * FROM daily_prices
+            ORDER BY product_id, recorded_at
+        `
+
+		startTime := time.Now()
+
+		var prices []models.PriceRecord
+		err := db.SelectContext(ctx, &prices, query, pq.Array(batchIDs), startDate, endDate)
+		queryTime := time.Since(startTime)
+
+		if err != nil {
+			log.Printf("Error in paginated batch query (time: %v): %v", queryTime, err)
+			return nil, fmt.Errorf("fetching batch prices: %w", err)
+		}
+
+		log.Printf("Paginated batch query completed in %v (products=%d)", queryTime, len(batchIDs))
+
+		// Group results by product_id
+		for _, price := range prices {
+			result[price.ProductID] = append(result[price.ProductID], price)
+		}
+	}
+
+	return result, nil
+}
+
+// Similarly for stocks
+func GetBatchStocksForProductsPaginated(ctx context.Context, db *sqlx.DB, productIDs []int,
+	warehouseIDs []int64, startDate, endDate time.Time, pageSize int) (map[int]map[int64][]models.StockRecord, error) {
+
+	if len(productIDs) == 0 || len(warehouseIDs) == 0 {
+		return make(map[int]map[int64][]models.StockRecord), nil
+	}
+
+	result := make(map[int]map[int64][]models.StockRecord)
+
+	// Process products in batches
+	for i := 0; i < len(productIDs); i += pageSize {
+		end := i + pageSize
+		if end > len(productIDs) {
+			end = len(productIDs)
+		}
+
+		batchIDs := productIDs[i:end]
+
+		query := `
+            WITH daily_stocks AS (
+                SELECT DISTINCT ON (product_id, warehouse_id, DATE_TRUNC('day', recorded_at))
+                    id, product_id, warehouse_id, amount, recorded_at
+                FROM stocks
+                WHERE product_id = ANY($1)
+                AND warehouse_id = ANY($2)
+                AND recorded_at BETWEEN $3 AND $4
+                ORDER BY product_id, warehouse_id, DATE_TRUNC('day', recorded_at), recorded_at DESC
+            )
+            SELECT * FROM daily_stocks
+            ORDER BY product_id, warehouse_id, recorded_at
+        `
+
+		startTime := time.Now()
+
+		var stocks []models.StockRecord
+		err := db.SelectContext(ctx, &stocks, query, pq.Array(batchIDs), pq.Array(warehouseIDs), startDate, endDate)
+		queryTime := time.Since(startTime)
+
+		if err != nil {
+			log.Printf("Error in paginated batch stock query (time: %v): %v", queryTime, err)
+			return nil, fmt.Errorf("fetching batch stocks: %w", err)
+		}
+
+		log.Printf("Paginated batch stock query completed in %v (products=%d, warehouses=%d)",
+			queryTime, len(batchIDs), len(warehouseIDs))
+
+		// Group results by product_id and warehouse_id
+		for _, stock := range stocks {
+			if _, ok := result[stock.ProductID]; !ok {
+				result[stock.ProductID] = make(map[int64][]models.StockRecord)
+			}
+			result[stock.ProductID][stock.WarehouseID] = append(result[stock.ProductID][stock.WarehouseID], stock)
+		}
+	}
+
+	return result, nil
+}
+
 func GetPricesForPeriod(ctx context.Context, db *sqlx.DB, productID int, startDate, endDate time.Time) ([]models.PriceRecord, error) {
 	// Оптимизированный запрос с группировкой по дням
 	query := `
@@ -448,91 +562,178 @@ func GetStocksForPeriod(ctx context.Context, db *sqlx.DB, productID int, warehou
 	return stocks, nil
 }
 
-// GetBatchPricesForProducts загружает цены для списка продуктов за период одним запросом
-func GetBatchPricesForProducts(ctx context.Context, db *sqlx.DB, productIDs []int, startDate, endDate time.Time) (map[int][]models.PriceRecord, error) {
+// TimeChunk represents a smaller chunk of time for processing
+type TimeChunk struct {
+	Start time.Time
+	End   time.Time
+}
+
+func GetBatchPricesForProducts(ctx context.Context, db *sqlx.DB, productIDs []int,
+	startDate, endDate time.Time) (map[int][]models.PriceRecord, error) {
+
 	if len(productIDs) == 0 {
 		return make(map[int][]models.PriceRecord), nil
 	}
 
-	// Оптимизированный запрос с выборкой только одной записи на день
-	query := `
-        WITH daily_prices AS (
-            SELECT DISTINCT ON (product_id, DATE_TRUNC('day', recorded_at))
-                id, product_id, size_id, price, discount, club_discount, final_price, 
-                club_final_price, currency_iso_code, tech_size_name, editable_size_price, recorded_at
-            FROM prices
-            WHERE product_id = ANY($1)
-            AND recorded_at BETWEEN $2 AND $3
-            ORDER BY product_id, DATE_TRUNC('day', recorded_at), recorded_at DESC
-        )
-        SELECT * FROM daily_prices
-        ORDER BY product_id, recorded_at
-    `
+	// Break the date range into smaller chunks if it's large
+	// For example, split into weeks or months if the range is more than a month
+	timeChunks := splitDateRange(startDate, endDate, 7) // 7-day chunks
 
-	startTime := time.Now()
+	result := make(map[int][]models.PriceRecord)
 
-	var prices []models.PriceRecord
-	err := db.SelectContext(ctx, &prices, query, pq.Array(productIDs), startDate, endDate)
-	queryTime := time.Since(startTime)
+	// Process each time chunk separately
+	for _, timeChunk := range timeChunks {
+		log.Printf("Processing price data from %s to %s",
+			timeChunk.Start.Format("2006-01-02"),
+			timeChunk.End.Format("2006-01-02"))
 
-	if err != nil {
-		log.Printf("Ошибка пакетного запроса цен (time: %v): %v", queryTime, err)
-		return nil, fmt.Errorf("fetching batch prices: %w", err)
+		query := `
+            WITH daily_prices AS (
+                SELECT DISTINCT ON (product_id, DATE_TRUNC('day', recorded_at))
+                    id, product_id, size_id, price, discount, club_discount, final_price, 
+                    club_final_price, currency_iso_code, tech_size_name, editable_size_price, recorded_at
+                FROM prices
+                WHERE product_id = ANY($1)
+                AND recorded_at BETWEEN $2 AND $3
+                ORDER BY product_id, DATE_TRUNC('day', recorded_at), recorded_at DESC
+            )
+            SELECT * FROM daily_prices
+            ORDER BY product_id, recorded_at
+        `
+
+		startTime := time.Now()
+
+		var prices []models.PriceRecord
+		err := db.SelectContext(ctx, &prices, query, pq.Array(productIDs), timeChunk.Start, timeChunk.End)
+
+		queryTime := time.Since(startTime)
+
+		if err != nil {
+			log.Printf("Error in time-chunked query (time: %v): %v", queryTime, err)
+			return nil, fmt.Errorf("fetching prices for time chunk: %w", err)
+		}
+
+		log.Printf("Time chunk query completed in %v (products=%d, records=%d)",
+			queryTime, len(productIDs), len(prices))
+
+		// Add results to the combined result map
+		for _, price := range prices {
+			result[price.ProductID] = append(result[price.ProductID], price)
+		}
 	}
 
-	log.Printf("Пакетный запрос цен выполнен за %v (products=%d)", queryTime, len(productIDs))
-
-	// Группируем результаты по product_id
-	result := make(map[int][]models.PriceRecord)
-	for _, price := range prices {
-		result[price.ProductID] = append(result[price.ProductID], price)
+	// Verify all products have data in expected time order
+	for productID, prices := range result {
+		if len(prices) > 1 {
+			// Ensure the data is sorted by time
+			sort.Slice(prices, func(i, j int) bool {
+				return prices[i].RecordedAt.Before(prices[j].RecordedAt)
+			})
+			result[productID] = prices
+		}
 	}
 
 	return result, nil
 }
 
+// splitDateRange breaks a large date range into smaller chunks
+func splitDateRange(start, end time.Time, chunkSizeInDays int) []TimeChunk {
+	var chunks []TimeChunk
+
+	// If the range is small enough, just return it as a single chunk
+	totalDays := int(end.Sub(start).Hours() / 24)
+	if totalDays <= chunkSizeInDays {
+		return []TimeChunk{{Start: start, End: end}}
+	}
+
+	// Split into chunks of the specified size
+	chunkStart := start
+	for chunkStart.Before(end) {
+		chunkEnd := chunkStart.AddDate(0, 0, chunkSizeInDays)
+		if chunkEnd.After(end) {
+			chunkEnd = end
+		}
+
+		chunks = append(chunks, TimeChunk{
+			Start: chunkStart,
+			End:   chunkEnd,
+		})
+
+		chunkStart = chunkEnd
+	}
+
+	return chunks
+}
+
 // GetBatchStocksForProducts загружает остатки для списка продуктов и складов за период одним запросом
-func GetBatchStocksForProducts(ctx context.Context, db *sqlx.DB, productIDs []int, warehouseIDs []int64, startDate, endDate time.Time) (map[int]map[int64][]models.StockRecord, error) {
+func GetBatchStocksForProducts(ctx context.Context, db *sqlx.DB, productIDs []int,
+	warehouseIDs []int64, startDate, endDate time.Time) (map[int]map[int64][]models.StockRecord, error) {
+
 	if len(productIDs) == 0 || len(warehouseIDs) == 0 {
 		return make(map[int]map[int64][]models.StockRecord), nil
 	}
 
-	// Оптимизированный запрос с выборкой только одной записи на день
-	query := `
-        WITH daily_stocks AS (
-            SELECT DISTINCT ON (product_id, warehouse_id, DATE_TRUNC('day', recorded_at))
-                id, product_id, warehouse_id, amount, recorded_at
-            FROM stocks
-            WHERE product_id = ANY($1)
-            AND warehouse_id = ANY($2)
-            AND recorded_at BETWEEN $3 AND $4
-            ORDER BY product_id, warehouse_id, DATE_TRUNC('day', recorded_at), recorded_at DESC
-        )
-        SELECT * FROM daily_stocks
-        ORDER BY product_id, warehouse_id, recorded_at
-    `
+	// Break the date range into smaller chunks
+	timeChunks := splitDateRange(startDate, endDate, 7) // 7-day chunks
 
-	startTime := time.Now()
+	result := make(map[int]map[int64][]models.StockRecord)
 
-	var stocks []models.StockRecord
-	err := db.SelectContext(ctx, &stocks, query, pq.Array(productIDs), pq.Array(warehouseIDs), startDate, endDate)
-	queryTime := time.Since(startTime)
+	// Process each time chunk separately
+	for _, timeChunk := range timeChunks {
+		log.Printf("Processing stock data from %s to %s",
+			timeChunk.Start.Format("2006-01-02"),
+			timeChunk.End.Format("2006-01-02"))
 
-	if err != nil {
-		log.Printf("Ошибка пакетного запроса остатков (time: %v): %v", queryTime, err)
-		return nil, fmt.Errorf("fetching batch stocks: %w", err)
+		query := `
+            WITH daily_stocks AS (
+                SELECT DISTINCT ON (product_id, warehouse_id, DATE_TRUNC('day', recorded_at))
+                    id, product_id, warehouse_id, amount, recorded_at
+                FROM stocks
+                WHERE product_id = ANY($1)
+                AND warehouse_id = ANY($2)
+                AND recorded_at BETWEEN $3 AND $4
+                ORDER BY product_id, warehouse_id, DATE_TRUNC('day', recorded_at), recorded_at DESC
+            )
+            SELECT * FROM daily_stocks
+            ORDER BY product_id, warehouse_id, recorded_at
+        `
+
+		startTime := time.Now()
+
+		var stocks []models.StockRecord
+		err := db.SelectContext(ctx, &stocks, query, pq.Array(productIDs), pq.Array(warehouseIDs),
+			timeChunk.Start, timeChunk.End)
+
+		queryTime := time.Since(startTime)
+
+		if err != nil {
+			log.Printf("Error in time-chunked stock query (time: %v): %v", queryTime, err)
+			return nil, fmt.Errorf("fetching stocks for time chunk: %w", err)
+		}
+
+		log.Printf("Time chunk stock query completed in %v (products=%d, warehouses=%d, records=%d)",
+			queryTime, len(productIDs), len(warehouseIDs), len(stocks))
+
+		// Add results to the combined result map
+		for _, stock := range stocks {
+			if _, ok := result[stock.ProductID]; !ok {
+				result[stock.ProductID] = make(map[int64][]models.StockRecord)
+			}
+			result[stock.ProductID][stock.WarehouseID] = append(
+				result[stock.ProductID][stock.WarehouseID], stock)
+		}
 	}
 
-	log.Printf("Пакетный запрос остатков выполнен за %v (products=%d, warehouses=%d)",
-		queryTime, len(productIDs), len(warehouseIDs))
-
-	// Группируем результаты по product_id и warehouse_id
-	result := make(map[int]map[int64][]models.StockRecord)
-	for _, stock := range stocks {
-		if _, ok := result[stock.ProductID]; !ok {
-			result[stock.ProductID] = make(map[int64][]models.StockRecord)
+	// Ensure data is sorted by time for each product/warehouse
+	for productID, warehouseMap := range result {
+		for warehouseID, stocks := range warehouseMap {
+			if len(stocks) > 1 {
+				sort.Slice(stocks, func(i, j int) bool {
+					return stocks[i].RecordedAt.Before(stocks[j].RecordedAt)
+				})
+				result[productID][warehouseID] = stocks
+			}
 		}
-		result[stock.ProductID][stock.WarehouseID] = append(result[stock.ProductID][stock.WarehouseID], stock)
 	}
 
 	return result, nil
