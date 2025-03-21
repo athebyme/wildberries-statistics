@@ -38,7 +38,8 @@ func (h *Handlers) RegisterRoutes(router *mux.Router) {
 	statsAPI.HandleFunc("/stock-changes", h.GetStockChanges).Methods("GET")
 
 	// Добавляем новый маршрут для пагинированных запросов
-	statsAPI.HandleFunc("/stock-changes/paginated", h.GetStockChangesWithPagination).Methods("GET")
+	statsAPI.HandleFunc("/stock-changes/paginated", h.GetStockChangesWithPagination).Methods("POST")
+	statsAPI.HandleFunc("/price-changes/paginated", h.GetPriceChangesWithPagination).Methods("POST")
 
 	statsAPI.HandleFunc("/price-history/{id}", h.GetPriceHistory).Methods("GET")
 	statsAPI.HandleFunc("/stock-history/{id}/{warehouseId}", h.GetStockHistory).Methods("GET")
@@ -371,7 +372,8 @@ func (h *Handlers) GetPriceChangesWithPagination(w http.ResponseWriter, r *http.
 
 // GetStockChangesWithPagination возвращает недавние изменения остатков с поддержкой пагинации и фильтрации
 func (h *Handlers) GetStockChangesWithPagination(w http.ResponseWriter, r *http.Request) {
-	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second) // Увеличиваем таймаут до 15 секунд
+	// Устанавливаем короткий таймаут для ускорения ответа
+	ctx, cancel := context.WithTimeout(r.Context(), 12*time.Second)
 	defer cancel()
 
 	// Получаем параметры запроса
@@ -381,9 +383,9 @@ func (h *Handlers) GetStockChangesWithPagination(w http.ResponseWriter, r *http.
 
 	// Параметры фильтрации
 	warehouseIDStr := r.URL.Query().Get("warehouseId")
-	minChangeAmountStr := r.URL.Query().Get("minChangeAmount")
-	minChangePercentStr := r.URL.Query().Get("minChangePercent")
-	sinceStr := r.URL.Query().Get("since") // Формат: YYYY-MM-DD
+	minChangePercentStr := r.URL.Query().Get("minChangePercent") // Приоритетный параметр
+	minChangeAmountStr := r.URL.Query().Get("minChangeAmount")   // Запасной параметр
+	sinceStr := r.URL.Query().Get("since")                       // Формат: YYYY-MM-DD
 
 	limit := 20 // Значение по умолчанию
 	if limitStr != "" {
@@ -393,10 +395,8 @@ func (h *Handlers) GetStockChangesWithPagination(w http.ResponseWriter, r *http.
 		}
 	}
 
-	// Ограничиваем максимальный размер страницы
-	if limit > 100 {
-		limit = 100
-	}
+	// Снимаем жесткое ограничение на размер страницы
+	// Это позволит возвращать больше записей, если запрошено
 
 	// Создаем объект фильтра
 	filter := StockChangeFilter{}
@@ -411,23 +411,23 @@ func (h *Handlers) GetStockChangesWithPagination(w http.ResponseWriter, r *http.
 		}
 	}
 
-	// Парсим минимальное абсолютное изменение
-	if minChangeAmountStr != "" {
-		minChangeAmount, err := strconv.Atoi(minChangeAmountStr)
-		if err == nil && minChangeAmount > 0 {
-			filter.MinChangeAmount = &minChangeAmount
-		} else {
-			log.Printf("Ошибка парсинга min_change_amount: %v", err)
-		}
-	}
-
-	// Парсим минимальное процентное изменение
+	// В первую очередь парсим минимальное процентное изменение
 	if minChangePercentStr != "" {
 		minChangePercent, err := strconv.ParseFloat(minChangePercentStr, 64)
 		if err == nil && minChangePercent > 0 {
 			filter.MinChangePercent = &minChangePercent
 		} else {
 			log.Printf("Ошибка парсинга min_change_percent: %v", err)
+		}
+	}
+
+	// Парсим минимальное абсолютное изменение только если процентное не задано
+	if minChangeAmountStr != "" && filter.MinChangePercent == nil {
+		minChangeAmount, err := strconv.Atoi(minChangeAmountStr)
+		if err == nil && minChangeAmount > 0 {
+			filter.MinChangeAmount = &minChangeAmount
+		} else {
+			log.Printf("Ошибка парсинга min_change_amount: %v", err)
 		}
 	}
 
@@ -441,14 +441,25 @@ func (h *Handlers) GetStockChangesWithPagination(w http.ResponseWriter, r *http.
 		}
 	}
 
+	// Измеряем время запроса для логирования производительности
+	startTime := time.Now()
+
 	// Получаем данные с пагинацией и фильтрацией
 	result, err := h.service.GetStockChangesWithCursor(ctx, limit, cursor, filter, refresh)
+
+	requestTime := time.Since(startTime)
+	log.Printf("API запрос изменений остатков выполнен за %v (limit=%d)", requestTime, limit)
+
 	if err != nil {
 		log.Printf("Ошибка при получении изменений остатков с пагинацией: %v", err)
 		http.Error(w, "Ошибка при получении изменений остатков", http.StatusInternalServerError)
 		return
 	}
 
+	// Добавляем заголовки кэширования для браузера
+	w.Header().Set("Cache-Control", "private, max-age=60")
+
+	// Отправляем ответ
 	sendJSONResponse(w, result)
 }
 
