@@ -856,7 +856,7 @@ type PaginatedPriceChanges struct {
 // Завершение GetPriceChangesWithCursor
 func (s *Service) GetPriceChangesWithCursor(ctx context.Context, limit int, cursor string, forceRefresh bool) (*PaginatedPriceChanges, error) {
 	// Короткий таймаут
-	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
 	if limit <= 0 {
@@ -1038,7 +1038,7 @@ type PaginatedStockChanges struct {
 // Optimized for memory efficiency with large datasets (30M+ records)
 func (s *Service) GetStockChangesWithCursor(ctx context.Context, limit int, cursor string, filter StockChangeFilter, forceRefresh bool) (*PaginatedStockChanges, error) {
 	// Устанавливаем короткий таймаут для ускорения ответа
-	ctx, cancel := context.WithTimeout(ctx, 12*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
 	if limit <= 0 {
