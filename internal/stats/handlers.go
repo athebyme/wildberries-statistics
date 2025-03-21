@@ -338,7 +338,7 @@ func (h *Handlers) GetStockHistory(w http.ResponseWriter, r *http.Request) {
 
 // GetPriceChangesWithPagination возвращает недавние изменения цен с поддержкой пагинации
 func (h *Handlers) GetPriceChangesWithPagination(w http.ResponseWriter, r *http.Request) {
-	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second) // Увеличиваем таймаут до 10 секунд
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second) // Увеличиваем таймаут до 10 секунд
 	defer cancel()
 
 	// Получаем параметры запроса
@@ -373,7 +373,7 @@ func (h *Handlers) GetPriceChangesWithPagination(w http.ResponseWriter, r *http.
 // GetStockChangesWithPagination возвращает недавние изменения остатков с поддержкой пагинации и фильтрации
 func (h *Handlers) GetStockChangesWithPagination(w http.ResponseWriter, r *http.Request) {
 	// Устанавливаем короткий таймаут для ускорения ответа
-	ctx, cancel := context.WithTimeout(r.Context(), 12*time.Second)
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
 
 	// Получаем параметры запроса
