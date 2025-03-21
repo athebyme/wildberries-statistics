@@ -1034,11 +1034,11 @@ type PaginatedStockChanges struct {
 	TotalCount int           `json:"totalCount"` // Приблизительное общее количество записей
 }
 
-// Updated GetStockChangesWithCursor method in internal/stats/stat_service.go
-// that fixes the "column 'change_percent' does not exist" error
+// GetStockChangesWithCursor returns stock changes with pagination and filtering
+// Optimized for memory efficiency with large datasets (30M+ records)
 func (s *Service) GetStockChangesWithCursor(ctx context.Context, limit int, cursor string, filter StockChangeFilter, forceRefresh bool) (*PaginatedStockChanges, error) {
 	// Устанавливаем короткий таймаут для ускорения ответа
-	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 12*time.Second)
 	defer cancel()
 
 	if limit <= 0 {
@@ -1075,6 +1075,8 @@ func (s *Service) GetStockChangesWithCursor(ctx context.Context, limit int, curs
 	// Разбираем курсор
 	var lastChangePercent float64
 	var lastDate time.Time
+	var lastProductID int
+	var lastWarehouseID int64
 
 	if cursor != "" {
 		decodedCursor, err := base64.StdEncoding.DecodeString(cursor)
@@ -1083,7 +1085,7 @@ func (s *Service) GetStockChangesWithCursor(ctx context.Context, limit int, curs
 		}
 
 		parts := strings.Split(string(decodedCursor), "|")
-		if len(parts) != 2 {
+		if len(parts) != 4 {
 			return nil, fmt.Errorf("недопустимый формат курсора")
 		}
 
@@ -1096,71 +1098,35 @@ func (s *Service) GetStockChangesWithCursor(ctx context.Context, limit int, curs
 		if err != nil {
 			return nil, fmt.Errorf("некорректное значение даты в курсоре: %w", err)
 		}
+
+		lastProductID, err = strconv.Atoi(parts[2])
+		if err != nil {
+			return nil, fmt.Errorf("некорректный product_id в курсоре: %w", err)
+		}
+
+		lastWarehouseID, err = strconv.ParseInt(parts[3], 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("некорректный warehouse_id в курсоре: %w", err)
+		}
 	}
 
 	// Устанавливаем значения фильтров по умолчанию
-	sinceDate := time.Now().AddDate(0, 0, -30) // По умолчанию 30 дней
+	sinceDate := time.Now().AddDate(0, 0, -14) // Сокращаем до 14 дней по умолчанию вместо 30
 	if filter.Since != nil {
 		sinceDate = *filter.Since
 	}
 
 	// Приоритет процентного изменения вместо абсолютного
-	minChangePercent := 5.0 // По умолчанию 5%
+	minChangePercent := 10.0 // Увеличиваем до 10% по умолчанию вместо 5%
 	if filter.MinChangePercent != nil && *filter.MinChangePercent > 0 {
 		minChangePercent = *filter.MinChangePercent
 	}
 
-	// Минимальное абсолютное изменение используем только если процентное не задано
-	minChangeAmt := 5 // По умолчанию 5 единиц
+	// Минимальное абсолютное изменение
+	minChangeAmt := 10 // Увеличиваем до 10 единиц по умолчанию вместо 5
 	if filter.MinChangeAmount != nil && *filter.MinChangeAmount > 0 {
 		minChangeAmt = *filter.MinChangeAmount
 	}
-
-	// Оптимизированный SQL-запрос с использованием оконных функций - исправленная версия
-	baseQuery := `
-        WITH stock_changes AS (
-            SELECT 
-                s1.product_id,
-                s1.warehouse_id,
-                s1.amount as new_amount,
-                s2.amount as old_amount,
-                s1.amount - s2.amount as change_amount,
-                CASE 
-                    WHEN s2.amount > 0 THEN ((s1.amount - s2.amount)::float / s2.amount) * 100 
-                    WHEN s2.amount = 0 AND s1.amount > 0 THEN 100
-                    ELSE 0 
-                END as change_percent,
-                ABS(CASE 
-                    WHEN s2.amount > 0 THEN ((s1.amount - s2.amount)::float / s2.amount) * 100 
-                    WHEN s2.amount = 0 AND s1.amount > 0 THEN 100
-                    ELSE 0 
-                END) as abs_change_percent,
-                s1.recorded_at as change_date
-            FROM stocks s1
-            JOIN stocks s2 ON s1.product_id = s2.product_id 
-                AND s1.warehouse_id = s2.warehouse_id
-                AND s2.recorded_at < s1.recorded_at
-            WHERE s1.recorded_at >= $1
-                AND ($2::bigint IS NULL OR s1.warehouse_id = $2)
-                AND (
-                    ABS(s1.amount - s2.amount) >= $3
-                    OR ABS(((s1.amount - s2.amount)::float / NULLIF(s2.amount, 0)) * 100) >= $4
-                )
-        ),
-        distinct_changes AS (
-            SELECT DISTINCT ON (product_id, warehouse_id)
-                product_id,
-                warehouse_id,
-                old_amount,
-                new_amount,
-                change_amount,
-                change_percent,
-                abs_change_percent,
-                change_date
-            FROM stock_changes
-            ORDER BY product_id, warehouse_id, abs_change_percent DESC
-        )
-    `
 
 	// Базовые аргументы для всех запросов
 	args := []interface{}{sinceDate}
@@ -1175,53 +1141,170 @@ func (s *Service) GetStockChangesWithCursor(ctx context.Context, limit int, curs
 	// Добавляем минимальные пороги изменений
 	args = append(args, minChangeAmt, minChangePercent)
 
-	// Формируем запрос в зависимости от наличия курсора
+	// Более эффективный запрос, избегающий JOIN на больших таблицах
+	// и использующий подзапросы для соединения только необходимых данных
 	var query string
 	if cursor == "" {
-		// Запрос для первой страницы
-		query = baseQuery + `
+		// Запрос для первой страницы - находим товары с наибольшими изменениями
+		// без использования JOIN и DISTINCT ON на полных таблицах
+		query = `
+            WITH latest_stocks AS (
+                SELECT s1.product_id, s1.warehouse_id, s1.amount, s1.recorded_at
+                FROM stocks s1
+                WHERE s1.recorded_at >= $1
+                AND s1.recorded_at = (
+                    SELECT MAX(s2.recorded_at)
+                    FROM stocks s2
+                    WHERE s2.product_id = s1.product_id AND s2.warehouse_id = s1.warehouse_id
+                )
+                AND ($2::bigint IS NULL OR s1.warehouse_id = $2)
+                LIMIT 10000
+            ),
+            previous_stocks AS (
+                SELECT s1.product_id, s1.warehouse_id, s1.amount, s1.recorded_at
+                FROM stocks s1
+                JOIN latest_stocks ls ON s1.product_id = ls.product_id AND s1.warehouse_id = ls.warehouse_id
+                WHERE s1.recorded_at < ls.recorded_at
+                AND s1.recorded_at = (
+                    SELECT MAX(s2.recorded_at)
+                    FROM stocks s2
+                    WHERE s2.product_id = s1.product_id 
+                    AND s2.warehouse_id = s1.warehouse_id
+                    AND s2.recorded_at < ls.recorded_at
+                )
+            ),
+            filtered_changes AS (
+                SELECT 
+                    ls.product_id,
+                    ls.warehouse_id,
+                    ps.amount as old_amount,
+                    ls.amount as new_amount,
+                    ls.amount - ps.amount as change_amount,
+                    CASE 
+                        WHEN ps.amount > 0 THEN ((ls.amount - ps.amount)::float / ps.amount) * 100 
+                        WHEN ps.amount = 0 AND ls.amount > 0 THEN 100
+                        ELSE 0 
+                    END as change_percent,
+                    ABS(CASE 
+                        WHEN ps.amount > 0 THEN ((ls.amount - ps.amount)::float / ps.amount) * 100 
+                        WHEN ps.amount = 0 AND ls.amount > 0 THEN 100
+                        ELSE 0 
+                    END) as abs_change_percent,
+                    ls.recorded_at as change_date
+                FROM latest_stocks ls
+                JOIN previous_stocks ps ON ls.product_id = ps.product_id AND ls.warehouse_id = ps.warehouse_id
+                WHERE 
+                    ABS(ls.amount - ps.amount) >= $3
+                    OR ABS(((ls.amount - ps.amount)::float / NULLIF(ps.amount, 0)) * 100) >= $4
+            )
             SELECT
-                dc.product_id,
+                fc.product_id,
                 p.name as product_name,
                 p.vendor_code,
-                dc.warehouse_id,
+                fc.warehouse_id,
                 w.name as warehouse_name,
-                dc.old_amount,
-                dc.new_amount,
-                dc.change_amount,
-                dc.change_percent,
-                dc.change_date
-            FROM distinct_changes dc
-            JOIN products p ON dc.product_id = p.id
-            JOIN warehouses w ON dc.warehouse_id = w.id
-            ORDER BY dc.abs_change_percent DESC, dc.change_date DESC
+                fc.old_amount,
+                fc.new_amount,
+                fc.change_amount,
+                fc.change_percent,
+                fc.change_date
+            FROM filtered_changes fc
+            JOIN products p ON fc.product_id = p.id
+            JOIN warehouses w ON fc.warehouse_id = w.id
+            ORDER BY fc.abs_change_percent DESC, fc.product_id, fc.warehouse_id
             LIMIT $5
         `
 		args = append(args, limit+1) // +1 для определения наличия следующей страницы
 	} else {
 		// Запрос для последующих страниц с использованием курсора
-		query = baseQuery + `
+		// Включаем product_id и warehouse_id в условие курсора для более эффективной пагинации
+		query = `
+            WITH latest_stocks AS (
+                SELECT s1.product_id, s1.warehouse_id, s1.amount, s1.recorded_at
+                FROM stocks s1
+                WHERE s1.recorded_at >= $1
+                AND s1.recorded_at = (
+                    SELECT MAX(s2.recorded_at)
+                    FROM stocks s2
+                    WHERE s2.product_id = s1.product_id AND s2.warehouse_id = s1.warehouse_id
+                )
+                AND ($2::bigint IS NULL OR s1.warehouse_id = $2)
+                LIMIT 10000
+            ),
+            previous_stocks AS (
+                SELECT s1.product_id, s1.warehouse_id, s1.amount, s1.recorded_at
+                FROM stocks s1
+                JOIN latest_stocks ls ON s1.product_id = ls.product_id AND s1.warehouse_id = ls.warehouse_id
+                WHERE s1.recorded_at < ls.recorded_at
+                AND s1.recorded_at = (
+                    SELECT MAX(s2.recorded_at)
+                    FROM stocks s2
+                    WHERE s2.product_id = s1.product_id 
+                    AND s2.warehouse_id = s1.warehouse_id
+                    AND s2.recorded_at < ls.recorded_at
+                )
+            ),
+            filtered_changes AS (
+                SELECT 
+                    ls.product_id,
+                    ls.warehouse_id,
+                    ps.amount as old_amount,
+                    ls.amount as new_amount,
+                    ls.amount - ps.amount as change_amount,
+                    CASE 
+                        WHEN ps.amount > 0 THEN ((ls.amount - ps.amount)::float / ps.amount) * 100 
+                        WHEN ps.amount = 0 AND ls.amount > 0 THEN 100
+                        ELSE 0 
+                    END as change_percent,
+                    ABS(CASE 
+                        WHEN ps.amount > 0 THEN ((ls.amount - ps.amount)::float / ps.amount) * 100 
+                        WHEN ps.amount = 0 AND ls.amount > 0 THEN 100
+                        ELSE 0 
+                    END) as abs_change_percent,
+                    ls.recorded_at as change_date
+                FROM latest_stocks ls
+                JOIN previous_stocks ps ON ls.product_id = ps.product_id AND ls.warehouse_id = ps.warehouse_id
+                WHERE 
+                    (ABS(ls.amount - ps.amount) >= $3
+                    OR ABS(((ls.amount - ps.amount)::float / NULLIF(ps.amount, 0)) * 100) >= $4)
+                    AND (
+                        ABS(CASE 
+                            WHEN ps.amount > 0 THEN ((ls.amount - ps.amount)::float / ps.amount) * 100 
+                            WHEN ps.amount = 0 AND ls.amount > 0 THEN 100
+                            ELSE 0 
+                        END) < $5
+                        OR (
+                            ABS(CASE 
+                                WHEN ps.amount > 0 THEN ((ls.amount - ps.amount)::float / ps.amount) * 100 
+                                WHEN ps.amount = 0 AND ls.amount > 0 THEN 100
+                                ELSE 0 
+                            END) = $5
+                            AND (
+                                ls.recorded_at < $6
+                                OR (ls.recorded_at = $6 AND ls.product_id > $7)
+                                OR (ls.recorded_at = $6 AND ls.product_id = $7 AND ls.warehouse_id > $8)
+                            )
+                        )
+                    )
+            )
             SELECT
-                dc.product_id,
+                fc.product_id,
                 p.name as product_name,
                 p.vendor_code,
-                dc.warehouse_id,
+                fc.warehouse_id,
                 w.name as warehouse_name,
-                dc.old_amount,
-                dc.new_amount,
-                dc.change_amount,
-                dc.change_percent,
-                dc.change_date
-            FROM distinct_changes dc
-            JOIN products p ON dc.product_id = p.id
-            JOIN warehouses w ON dc.warehouse_id = w.id
-            WHERE 
-                dc.abs_change_percent < $5
-                OR (dc.abs_change_percent = $5 AND dc.change_date < $6)
-            ORDER BY dc.abs_change_percent DESC, dc.change_date DESC
-            LIMIT $7
+                fc.old_amount,
+                fc.new_amount,
+                fc.change_amount,
+                fc.change_percent,
+                fc.change_date
+            FROM filtered_changes fc
+            JOIN products p ON fc.product_id = p.id
+            JOIN warehouses w ON fc.warehouse_id = w.id
+            ORDER BY fc.abs_change_percent DESC, fc.product_id, fc.warehouse_id
+            LIMIT $9
         `
-		args = append(args, math.Abs(lastChangePercent), lastDate, limit+1)
+		args = append(args, math.Abs(lastChangePercent), lastDate, lastProductID, lastWarehouseID, limit+1)
 	}
 
 	// Запускаем запрос с логированием производительности
@@ -1244,51 +1327,42 @@ func (s *Service) GetStockChangesWithCursor(ctx context.Context, limit int, curs
 		changes = changes[:limit]
 	}
 
-	// Создаем курсор для следующей страницы на основе процента изменения
+	// Создаем курсор для следующей страницы
 	var nextCursor string
 	if hasMore && len(changes) > 0 {
 		lastItem := changes[len(changes)-1]
-		cursorStr := fmt.Sprintf("%.2f|%s", math.Abs(lastItem.ChangePercent), lastItem.Date.Format(time.RFC3339))
+		// Добавляем product_id и warehouse_id в курсор для более точной пагинации
+		cursorStr := fmt.Sprintf("%.2f|%s|%d|%d",
+			math.Abs(lastItem.ChangePercent),
+			lastItem.Date.Format(time.RFC3339),
+			lastItem.ProductID,
+			lastItem.WarehouseID)
 		nextCursor = base64.StdEncoding.EncodeToString([]byte(cursorStr))
 	}
 
-	// Рассчитываем общее количество записей без LIMIT
-	totalCount := 0
-	if cursor == "" {
-		// Быстрая оценка общего количества
+	// Приблизительная оценка общего количества
+	totalCount := len(changes)
+	if hasMore {
+		totalCount = limit * 10 // Приблизительная оценка
+	}
+
+	// В случае отсутствия данных на первой странице пробуем получить более точную оценку
+	if cursor == "" && len(changes) < 10 {
+		var estimatedCount int
 		countQuery := `
-            SELECT COUNT(*)
-            FROM (
-                SELECT 1
-                FROM (
-                    SELECT DISTINCT ON (product_id, warehouse_id)
-                        product_id, warehouse_id
-                    FROM stock_changes
-                    LIMIT 10000
-                ) AS filtered
-            ) AS count_estimate
-        `
-
-		// Используем те же параметры, что и для основного запроса
-		countArgs := args[:4]
-
-		startCountTime := time.Now()
-		err := s.db.GetContext(ctx, &totalCount, countQuery, countArgs...)
-		countQueryTime := time.Since(startCountTime)
-
-		if err != nil {
-			log.Printf("Ошибка получения общего количества: %v", err)
-			// Продолжаем работу с приблизительным количеством
-			totalCount = len(changes) * 2 // Примерная оценка
-			if hasMore {
-				totalCount = limit * 2
-			}
-		} else {
-			log.Printf("Запрос подсчета выполнен за %v", countQueryTime)
+			SELECT COUNT(*) 
+			FROM (
+				SELECT s1.product_id, s1.warehouse_id
+				FROM stocks s1
+				WHERE s1.recorded_at >= $1
+				AND ($2::bigint IS NULL OR s1.warehouse_id = $2)
+				LIMIT 1000
+			) AS sample
+		`
+		err := s.db.GetContext(ctx, &estimatedCount, countQuery, sinceDate, warehouseIDValue)
+		if err == nil && estimatedCount > 0 {
+			totalCount = estimatedCount
 		}
-	} else if cachedData, found := s.cache.Get(cacheKey); found {
-		// Используем cached totalCount для последующих страниц
-		totalCount = cachedData.(*PaginatedStockChanges).TotalCount
 	}
 
 	// Создаем результат
