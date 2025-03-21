@@ -177,8 +177,8 @@ CREATE INDEX IF NOT EXISTS idx_prices_product_id_recorded_at ON prices(product_i
 CREATE INDEX IF NOT EXISTS idx_stocks_product_id_warehouse_id_recorded_at ON stocks(product_id, warehouse_id, recorded_at DESC);
 
 -- Индекс для запросов по временным диапазонам
-CREATE INDEX IF NOT EXISTS idx_prices_recorded_at_range ON prices(recorded_at) WHERE recorded_at > current_date - interval '90 days';
-CREATE INDEX IF NOT EXISTS idx_stocks_recorded_at_range ON stocks(recorded_at) WHERE recorded_at > current_date - interval '90 days';
+CREATE INDEX IF NOT EXISTS idx_prices_recorded_at_range ON prices(recorded_at);
+CREATE INDEX IF NOT EXISTS idx_stocks_recorded_at_range ON stocks(recorded_at);
 
 -- Индексы для эффективной фильтрации по складам
 CREATE INDEX IF NOT EXISTS idx_stocks_warehouse_date ON stocks(warehouse_id, recorded_at);
@@ -188,12 +188,12 @@ CREATE INDEX IF NOT EXISTS idx_prices_product_price_date ON prices(product_id, p
 CREATE INDEX IF NOT EXISTS idx_stocks_product_warehouse_amount_date ON stocks(product_id, warehouse_id, amount, recorded_at);
 
 
-ALTER SYSTEM SET work_mem = '32MB';         -- Увеличить память для операций сортировки
-ALTER SYSTEM SET maintenance_work_mem = '256MB'; -- Больше памяти для обслуживания индексов
-ALTER SYSTEM SET random_page_cost = 1.1;    -- Оптимизировать для SSD дисков
-ALTER SYSTEM SET effective_cache_size = '4GB'; -- Настройка с учетом объема ОЗУ сервера
-ALTER SYSTEM SET shared_buffers = '1GB';    -- Буфер памяти для кэширования данных
-SELECT pg_reload_conf();                    -- Перезагрузить конфигурацию
+-- ALTER SYSTEM SET work_mem = '32MB';         -- Увеличить память для операций сортировки
+-- ALTER SYSTEM SET maintenance_work_mem = '256MB'; -- Больше памяти для обслуживания индексов
+-- ALTER SYSTEM SET random_page_cost = 1.1;    -- Оптимизировать для SSD дисков
+-- ALTER SYSTEM SET effective_cache_size = '4GB'; -- Настройка с учетом объема ОЗУ сервера
+-- ALTER SYSTEM SET shared_buffers = '1GB';    -- Буфер памяти для кэширования данных
+-- SELECT pg_reload_conf();                    -- Перезагрузить конфигурацию
 
 
 ANALYZE prices;
