@@ -1036,7 +1036,6 @@ type PaginatedStockChanges struct {
 
 // Updated GetStockChangesWithCursor method in internal/stats/stat_service.go
 // that fixes the "column 'change_percent' does not exist" error
-
 func (s *Service) GetStockChangesWithCursor(ctx context.Context, limit int, cursor string, filter StockChangeFilter, forceRefresh bool) (*PaginatedStockChanges, error) {
 	// Устанавливаем короткий таймаут для ускорения ответа
 	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
@@ -1117,42 +1116,49 @@ func (s *Service) GetStockChangesWithCursor(ctx context.Context, limit int, curs
 		minChangeAmt = *filter.MinChangeAmount
 	}
 
-	// Оптимизированный SQL-запрос с использованием оконных функций
-	// для ускорения и уменьшения количества строк
+	// Оптимизированный SQL-запрос с использованием оконных функций - исправленная версия
 	baseQuery := `
-        WITH recent_stocks AS (
+        WITH stock_changes AS (
             SELECT 
-                product_id,
-                warehouse_id,
-                amount,
-                recorded_at,
-                LAG(amount) OVER (PARTITION BY product_id, warehouse_id ORDER BY recorded_at) AS prev_amount,
-                LAG(recorded_at) OVER (PARTITION BY product_id, warehouse_id ORDER BY recorded_at) AS prev_recorded_at
-            FROM stocks
-            WHERE recorded_at >= $1
-            AND ($2::bigint IS NULL OR warehouse_id = $2)
+                s1.product_id,
+                s1.warehouse_id,
+                s1.amount as new_amount,
+                s2.amount as old_amount,
+                s1.amount - s2.amount as change_amount,
+                CASE 
+                    WHEN s2.amount > 0 THEN ((s1.amount - s2.amount)::float / s2.amount) * 100 
+                    WHEN s2.amount = 0 AND s1.amount > 0 THEN 100
+                    ELSE 0 
+                END as change_percent,
+                ABS(CASE 
+                    WHEN s2.amount > 0 THEN ((s1.amount - s2.amount)::float / s2.amount) * 100 
+                    WHEN s2.amount = 0 AND s1.amount > 0 THEN 100
+                    ELSE 0 
+                END) as abs_change_percent,
+                s1.recorded_at as change_date
+            FROM stocks s1
+            JOIN stocks s2 ON s1.product_id = s2.product_id 
+                AND s1.warehouse_id = s2.warehouse_id
+                AND s2.recorded_at < s1.recorded_at
+            WHERE s1.recorded_at >= $1
+                AND ($2::bigint IS NULL OR s1.warehouse_id = $2)
+                AND (
+                    ABS(s1.amount - s2.amount) >= $3
+                    OR ABS(((s1.amount - s2.amount)::float / NULLIF(s2.amount, 0)) * 100) >= $4
+                )
         ),
-        significant_changes AS (
+        distinct_changes AS (
             SELECT DISTINCT ON (product_id, warehouse_id)
                 product_id,
                 warehouse_id,
-                prev_amount as old_amount,
-                amount as new_amount,
-                amount - prev_amount as change_amount,
-                CASE 
-                    WHEN prev_amount > 0 THEN ((amount - prev_amount)::float / prev_amount) * 100 
-                    WHEN prev_amount = 0 AND amount > 0 THEN 100
-                    ELSE 0 
-                END as change_percent,
-                recorded_at as change_date
-            FROM recent_stocks
-            WHERE 
-                prev_amount IS NOT NULL
-                AND (
-                    ABS(amount - prev_amount) >= $3
-                    OR ABS(((amount - prev_amount)::float / NULLIF(prev_amount, 0)) * 100) >= $4
-                )
-            ORDER BY product_id, warehouse_id, ABS(change_percent) DESC
+                old_amount,
+                new_amount,
+                change_amount,
+                change_percent,
+                abs_change_percent,
+                change_date
+            FROM stock_changes
+            ORDER BY product_id, warehouse_id, abs_change_percent DESC
         )
     `
 
@@ -1175,20 +1181,20 @@ func (s *Service) GetStockChangesWithCursor(ctx context.Context, limit int, curs
 		// Запрос для первой страницы
 		query = baseQuery + `
             SELECT
-                sc.product_id,
+                dc.product_id,
                 p.name as product_name,
                 p.vendor_code,
-                sc.warehouse_id,
+                dc.warehouse_id,
                 w.name as warehouse_name,
-                sc.old_amount,
-                sc.new_amount,
-                sc.change_amount,
-                sc.change_percent,
-                sc.change_date
-            FROM significant_changes sc
-            JOIN products p ON sc.product_id = p.id
-            JOIN warehouses w ON sc.warehouse_id = w.id
-            ORDER BY ABS(sc.change_percent) DESC, sc.change_date DESC
+                dc.old_amount,
+                dc.new_amount,
+                dc.change_amount,
+                dc.change_percent,
+                dc.change_date
+            FROM distinct_changes dc
+            JOIN products p ON dc.product_id = p.id
+            JOIN warehouses w ON dc.warehouse_id = w.id
+            ORDER BY dc.abs_change_percent DESC, dc.change_date DESC
             LIMIT $5
         `
 		args = append(args, limit+1) // +1 для определения наличия следующей страницы
@@ -1196,23 +1202,23 @@ func (s *Service) GetStockChangesWithCursor(ctx context.Context, limit int, curs
 		// Запрос для последующих страниц с использованием курсора
 		query = baseQuery + `
             SELECT
-                sc.product_id,
+                dc.product_id,
                 p.name as product_name,
                 p.vendor_code,
-                sc.warehouse_id,
+                dc.warehouse_id,
                 w.name as warehouse_name,
-                sc.old_amount,
-                sc.new_amount,
-                sc.change_amount,
-                sc.change_percent,
-                sc.change_date
-            FROM significant_changes sc
-            JOIN products p ON sc.product_id = p.id
-            JOIN warehouses w ON sc.warehouse_id = w.id
+                dc.old_amount,
+                dc.new_amount,
+                dc.change_amount,
+                dc.change_percent,
+                dc.change_date
+            FROM distinct_changes dc
+            JOIN products p ON dc.product_id = p.id
+            JOIN warehouses w ON dc.warehouse_id = w.id
             WHERE 
-                ABS(sc.change_percent) < $5
-                OR (ABS(sc.change_percent) = $5 AND sc.change_date < $6)
-            ORDER BY ABS(sc.change_percent) DESC, sc.change_date DESC
+                dc.abs_change_percent < $5
+                OR (dc.abs_change_percent = $5 AND dc.change_date < $6)
+            ORDER BY dc.abs_change_percent DESC, dc.change_date DESC
             LIMIT $7
         `
 		args = append(args, math.Abs(lastChangePercent), lastDate, limit+1)
@@ -1255,18 +1261,9 @@ func (s *Service) GetStockChangesWithCursor(ctx context.Context, limit int, curs
             FROM (
                 SELECT 1
                 FROM (
-                    SELECT DISTINCT ON (s1.product_id, s1.warehouse_id)
-                        s1.product_id, s1.warehouse_id
-                    FROM stocks s1
-                    JOIN stocks s2 ON s1.product_id = s2.product_id 
-                      AND s1.warehouse_id = s2.warehouse_id
-                      AND s1.recorded_at < s2.recorded_at
-                    WHERE s2.recorded_at >= $1
-                    AND ($2::bigint IS NULL OR s1.warehouse_id = $2)
-                    AND (
-                        ABS(s2.amount - s1.amount) >= $3
-                        OR ABS(((s2.amount - s1.amount)::float / NULLIF(s1.amount, 0)) * 100) >= $4
-                    )
+                    SELECT DISTINCT ON (product_id, warehouse_id)
+                        product_id, warehouse_id
+                    FROM stock_changes
                     LIMIT 10000
                 ) AS filtered
             ) AS count_estimate
