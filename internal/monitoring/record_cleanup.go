@@ -747,59 +747,88 @@ func (s *RecordCleanupService) ensureHourlyPriceSnapshotsBatch(
 
 // Пакетная вставка снапшотов цен
 func (s *RecordCleanupService) batchInsertPriceSnapshots(ctx context.Context, snapshots []models.PriceSnapshot) error {
-	// Используем транзакцию для пакетной вставки
-	tx, err := s.db.BeginTxx(ctx, nil)
+	if len(snapshots) == 0 {
+		return nil
+	}
+
+	// Создаем временную таблицу
+	tx, err := s.db.BeginTxx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
 	if err != nil {
 		return fmt.Errorf("starting transaction: %w", err)
 	}
 	defer tx.Rollback()
 
-	// Подготавливаем запрос для пакетной вставки
+	// Создаем временную таблицу
+	_, err = tx.ExecContext(ctx, `
+        CREATE TEMP TABLE temp_price_snapshots (
+            product_id INTEGER NOT NULL,
+            size_id INTEGER NOT NULL,
+            price INTEGER NOT NULL,
+            discount INTEGER NOT NULL,
+            club_discount INTEGER NOT NULL,
+            final_price INTEGER NOT NULL,
+            club_final_price INTEGER NOT NULL,
+            currency_iso_code TEXT NOT NULL,
+            tech_size_name TEXT NOT NULL,
+            editable_size_price BOOLEAN NOT NULL,
+            snapshot_time TIMESTAMP NOT NULL
+        ) ON COMMIT DROP
+    `)
+	if err != nil {
+		return fmt.Errorf("creating temp table: %w", err)
+	}
+
+	// Подготавливаем запрос для вставки во временную таблицу
 	stmt, err := tx.PrepareContext(ctx, `
-        INSERT INTO price_snapshots (
+        INSERT INTO temp_price_snapshots (
             product_id, size_id, price, discount, club_discount, 
             final_price, club_final_price, currency_iso_code, 
             tech_size_name, editable_size_price, snapshot_time
-        ) VALUES (
-            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11
-        )
-        ON CONFLICT (product_id, size_id, snapshot_time) DO NOTHING
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
     `)
 	if err != nil {
 		return fmt.Errorf("preparing statement: %w", err)
 	}
 	defer stmt.Close()
 
-	// Вставляем снапшоты пакетами по 1000 штук
-	batchSize := 1000
-
-	for i := 0; i < len(snapshots); i += batchSize {
-		end := i + batchSize
-		if end > len(snapshots) {
-			end = len(snapshots)
-		}
-
-		batch := snapshots[i:end]
-
-		for _, snapshot := range batch {
-			_, err := stmt.ExecContext(ctx,
-				snapshot.ProductID, snapshot.SizeID, snapshot.Price,
-				snapshot.Discount, snapshot.ClubDiscount, snapshot.FinalPrice,
-				snapshot.ClubFinalPrice, snapshot.CurrencyIsoCode,
-				snapshot.TechSizeName, snapshot.EditableSizePrice, snapshot.SnapshotTime)
-
-			if err != nil {
-				return fmt.Errorf("executing insert: %w", err)
-			}
+	// Вставляем все данные во временную таблицу
+	for _, snapshot := range snapshots {
+		_, err := stmt.ExecContext(ctx,
+			snapshot.ProductID, snapshot.SizeID, snapshot.Price,
+			snapshot.Discount, snapshot.ClubDiscount, snapshot.FinalPrice,
+			snapshot.ClubFinalPrice, snapshot.CurrencyIsoCode,
+			snapshot.TechSizeName, snapshot.EditableSizePrice, snapshot.SnapshotTime)
+		if err != nil {
+			return fmt.Errorf("inserting into temp table: %w", err)
 		}
 	}
 
-	// Фиксируем транзакцию
+	// Вставляем данные из временной таблицы в основную, игнорируя дубликаты
+	_, err = tx.ExecContext(ctx, `
+        INSERT INTO price_snapshots (
+            product_id, size_id, price, discount, club_discount, 
+            final_price, club_final_price, currency_iso_code, 
+            tech_size_name, editable_size_price, snapshot_time
+        )
+        SELECT 
+            product_id, size_id, price, discount, club_discount, 
+            final_price, club_final_price, currency_iso_code, 
+            tech_size_name, editable_size_price, snapshot_time
+        FROM temp_price_snapshots t
+        WHERE NOT EXISTS (
+            SELECT 1 FROM price_snapshots p
+            WHERE p.product_id = t.product_id 
+            AND p.size_id = t.size_id 
+            AND p.snapshot_time = t.snapshot_time
+        )
+    `)
+	if err != nil {
+		return fmt.Errorf("inserting from temp table: %w", err)
+	}
+
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("committing transaction: %w", err)
 	}
-
-	log.Printf("Inserted %d price snapshots", len(snapshots))
 
 	return nil
 }
@@ -965,55 +994,74 @@ func (s *RecordCleanupService) getStockRecordsForPeriodBatch(
 
 // Пакетная вставка снапшотов остатков
 func (s *RecordCleanupService) batchInsertStockSnapshots(ctx context.Context, snapshots []models.StockSnapshot) error {
-	// Используем транзакцию для пакетной вставки
-	tx, err := s.db.BeginTxx(ctx, nil)
+	if len(snapshots) == 0 {
+		return nil
+	}
+
+	// Создаем транзакцию с уровнем изоляции READ COMMITTED для уменьшения вероятности deadlock
+	tx, err := s.db.BeginTxx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
 	if err != nil {
 		return fmt.Errorf("starting transaction: %w", err)
 	}
 	defer tx.Rollback()
 
-	// Подготавливаем запрос для пакетной вставки
+	// Создаем временную таблицу
+	_, err = tx.ExecContext(ctx, `
+        CREATE TEMP TABLE temp_stock_snapshots (
+            product_id INTEGER NOT NULL,
+            warehouse_id BIGINT NOT NULL,
+            amount INTEGER NOT NULL,
+            snapshot_time TIMESTAMP NOT NULL
+        ) ON COMMIT DROP
+    `)
+	if err != nil {
+		return fmt.Errorf("creating temp table: %w", err)
+	}
+
+	// Подготавливаем запрос для вставки во временную таблицу
 	stmt, err := tx.PrepareContext(ctx, `
-        INSERT INTO stock_snapshots (
+        INSERT INTO temp_stock_snapshots (
             product_id, warehouse_id, amount, snapshot_time
-        ) VALUES (
-            $1, $2, $3, $4
-        )
-        ON CONFLICT (product_id, warehouse_id, snapshot_time) DO NOTHING
+        ) VALUES ($1, $2, $3, $4)
     `)
 	if err != nil {
 		return fmt.Errorf("preparing statement: %w", err)
 	}
 	defer stmt.Close()
 
-	// Вставляем снапшоты пакетами по 1000 штук
-	batchSize := 1000
-
-	for i := 0; i < len(snapshots); i += batchSize {
-		end := i + batchSize
-		if end > len(snapshots) {
-			end = len(snapshots)
-		}
-
-		batch := snapshots[i:end]
-
-		for _, snapshot := range batch {
-			_, err := stmt.ExecContext(ctx,
-				snapshot.ProductID, snapshot.WarehouseID, snapshot.Amount, snapshot.SnapshotTime)
-
-			if err != nil {
-				return fmt.Errorf("executing insert: %w", err)
-			}
+	// Вставляем все данные во временную таблицу
+	for _, snapshot := range snapshots {
+		_, err := stmt.ExecContext(ctx,
+			snapshot.ProductID, snapshot.WarehouseID, snapshot.Amount, snapshot.SnapshotTime)
+		if err != nil {
+			return fmt.Errorf("inserting into temp table: %w", err)
 		}
 	}
 
-	// Фиксируем транзакцию
+	// Вставляем данные из временной таблицы в основную, игнорируя дубликаты
+	_, err = tx.ExecContext(ctx, `
+        INSERT INTO stock_snapshots (
+            product_id, warehouse_id, amount, snapshot_time
+        )
+        SELECT 
+            product_id, warehouse_id, amount, snapshot_time
+        FROM temp_stock_snapshots t
+        WHERE NOT EXISTS (
+            SELECT 1 FROM stock_snapshots s
+            WHERE s.product_id = t.product_id 
+            AND s.warehouse_id = t.warehouse_id 
+            AND s.snapshot_time = t.snapshot_time
+        )
+    `)
+	if err != nil {
+		return fmt.Errorf("inserting from temp table: %w", err)
+	}
+
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("committing transaction: %w", err)
 	}
 
-	log.Printf("Inserted %d stock snapshots", len(snapshots))
-
+	log.Printf("Successfully inserted %d stock snapshots using temporary table approach", len(snapshots))
 	return nil
 }
 
