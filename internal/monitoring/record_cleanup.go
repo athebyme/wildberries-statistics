@@ -751,7 +751,7 @@ func (s *RecordCleanupService) batchInsertPriceSnapshots(ctx context.Context, sn
 		return nil
 	}
 
-	// Создаем временную таблицу
+	// Создаем транзакцию
 	tx, err := s.db.BeginTxx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
 	if err != nil {
 		return fmt.Errorf("starting transaction: %w", err)
@@ -803,7 +803,7 @@ func (s *RecordCleanupService) batchInsertPriceSnapshots(ctx context.Context, sn
 		}
 	}
 
-	// Вставляем данные из временной таблицы в основную, игнорируя дубликаты
+	// Ключевое изменение: используем ON CONFLICT DO NOTHING
 	_, err = tx.ExecContext(ctx, `
         INSERT INTO price_snapshots (
             product_id, size_id, price, discount, club_discount, 
@@ -814,13 +814,8 @@ func (s *RecordCleanupService) batchInsertPriceSnapshots(ctx context.Context, sn
             product_id, size_id, price, discount, club_discount, 
             final_price, club_final_price, currency_iso_code, 
             tech_size_name, editable_size_price, snapshot_time
-        FROM temp_price_snapshots t
-        WHERE NOT EXISTS (
-            SELECT 1 FROM price_snapshots p
-            WHERE p.product_id = t.product_id 
-            AND p.size_id = t.size_id 
-            AND p.snapshot_time = t.snapshot_time
-        )
+        FROM temp_price_snapshots
+        ON CONFLICT (product_id, size_id, snapshot_time) DO NOTHING
     `)
 	if err != nil {
 		return fmt.Errorf("inserting from temp table: %w", err)
@@ -830,6 +825,7 @@ func (s *RecordCleanupService) batchInsertPriceSnapshots(ctx context.Context, sn
 		return fmt.Errorf("committing transaction: %w", err)
 	}
 
+	log.Printf("Successfully processed %d price snapshots", len(snapshots))
 	return nil
 }
 
@@ -998,7 +994,7 @@ func (s *RecordCleanupService) batchInsertStockSnapshots(ctx context.Context, sn
 		return nil
 	}
 
-	// Создаем транзакцию с уровнем изоляции READ COMMITTED для уменьшения вероятности deadlock
+	// Создаем транзакцию
 	tx, err := s.db.BeginTxx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
 	if err != nil {
 		return fmt.Errorf("starting transaction: %w", err)
@@ -1038,20 +1034,15 @@ func (s *RecordCleanupService) batchInsertStockSnapshots(ctx context.Context, sn
 		}
 	}
 
-	// Вставляем данные из временной таблицы в основную, игнорируя дубликаты
+	// Ключевое изменение: используем ON CONFLICT DO NOTHING
 	_, err = tx.ExecContext(ctx, `
         INSERT INTO stock_snapshots (
             product_id, warehouse_id, amount, snapshot_time
         )
         SELECT 
             product_id, warehouse_id, amount, snapshot_time
-        FROM temp_stock_snapshots t
-        WHERE NOT EXISTS (
-            SELECT 1 FROM stock_snapshots s
-            WHERE s.product_id = t.product_id 
-            AND s.warehouse_id = t.warehouse_id 
-            AND s.snapshot_time = t.snapshot_time
-        )
+        FROM temp_stock_snapshots
+        ON CONFLICT (product_id, warehouse_id, snapshot_time) DO NOTHING
     `)
 	if err != nil {
 		return fmt.Errorf("inserting from temp table: %w", err)
@@ -1061,7 +1052,7 @@ func (s *RecordCleanupService) batchInsertStockSnapshots(ctx context.Context, sn
 		return fmt.Errorf("committing transaction: %w", err)
 	}
 
-	log.Printf("Successfully inserted %d stock snapshots using temporary table approach", len(snapshots))
+	log.Printf("Successfully processed %d stock snapshots", len(snapshots))
 	return nil
 }
 
