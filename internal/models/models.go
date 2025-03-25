@@ -74,6 +74,7 @@ type PriceRecord struct {
 	TechSizeName      string    `db:"tech_size_name"`
 	EditableSizePrice bool      `db:"editable_size_price"`
 	RecordedAt        time.Time `db:"recorded_at"`
+	RowNumber         int       `db:"rn"`
 }
 
 // Структура для записи о складских остатках
@@ -83,6 +84,7 @@ type StockRecord struct {
 	WarehouseID int64     `db:"warehouse_id"`
 	Amount      int       `db:"amount"`
 	RecordedAt  time.Time `db:"recorded_at"`
+	RowNumber   int       `db:"rn"`
 }
 
 type ProductRecord struct {
@@ -92,6 +94,7 @@ type ProductRecord struct {
 	Barcode    string    `db:"barcode"`
 	Name       string    `db:"name"`
 	CreatedAt  time.Time `db:"created_at"`
+	RowNumber  int       `db:"rn"`
 }
 
 // Структура для ответа API цен и скидок

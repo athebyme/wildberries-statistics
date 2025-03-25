@@ -57,7 +57,7 @@ services:
     volumes:
       - postgres-second:/var/lib/postgresql/data
     ports:
-      - "5433:5432"  # Исправлено: внешний порт 5433 -> внутренний порт 5432
+      - "5433:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U lasciva -d db_second"]
       interval: 10s
