@@ -208,6 +208,12 @@ func (m *Service) RunMonitoring(ctx context.Context) error {
 
 	// Запускаем сервис очистки записей
 
+	if m.config.UseImprovedServices {
+		if err := m.UpdateWithImprovedComponents(); err != nil {
+			log.Printf("Error updating with improved components: %v", err)
+		}
+	}
+
 	go func() {
 		err := m.UpdateWarehouses(ctx)
 		if err != nil {
