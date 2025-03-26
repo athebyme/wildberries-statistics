@@ -813,3 +813,276 @@ func GetLatestStocksForProducts(ctx context.Context, db *sqlx.DB, productIDs []i
 
 	return result, nil
 }
+
+func GetPriceSnapshotsForPeriod(ctx context.Context, db *sqlx.DB, productID int, startDate, endDate time.Time) ([]models.PriceRecord, error) {
+	query := `
+        WITH daily_prices AS (
+            SELECT DISTINCT ON (DATE_TRUNC('day', snapshot_time))
+                id, product_id, size_id, price, discount, club_discount, final_price, 
+                club_final_price, currency_iso_code, tech_size_name, editable_size_price, snapshot_time as recorded_at
+            FROM price_snapshots
+            WHERE product_id = $1
+            AND snapshot_time BETWEEN $2 AND $3
+            ORDER BY DATE_TRUNC('day', snapshot_time), snapshot_time DESC
+        )
+        SELECT * FROM daily_prices
+        ORDER BY recorded_at
+    `
+
+	startTime := time.Now()
+	prices := []models.PriceRecord{}
+	err := db.SelectContext(ctx, &prices, query, productID, startDate, endDate)
+	queryTime := time.Since(startTime)
+
+	if err != nil {
+		log.Printf("Error querying price snapshots for period (time: %v): %v", queryTime, err)
+		return nil, fmt.Errorf("fetching price snapshots for period from DB: %w", err)
+	}
+
+	log.Printf("Price snapshots query completed in %v", queryTime)
+	return prices, nil
+}
+
+func GetStockSnapshotsForPeriod(ctx context.Context, db *sqlx.DB, productID int, warehouseID int64, startDate, endDate time.Time) ([]models.StockRecord, error) {
+	query := `
+        WITH daily_stocks AS (
+            SELECT DISTINCT ON (DATE_TRUNC('day', snapshot_time))
+                id, product_id, warehouse_id, amount, snapshot_time as recorded_at
+            FROM stock_snapshots
+            WHERE product_id = $1
+            AND warehouse_id = $2
+            AND snapshot_time BETWEEN $3 AND $4
+            ORDER BY DATE_TRUNC('day', snapshot_time), snapshot_time DESC
+        )
+        SELECT * FROM daily_stocks
+        ORDER BY recorded_at
+    `
+
+	startTime := time.Now()
+	stocks := []models.StockRecord{}
+	err := db.SelectContext(ctx, &stocks, query, productID, warehouseID, startDate, endDate)
+	queryTime := time.Since(startTime)
+
+	if err != nil {
+		log.Printf("Error querying stock snapshots for period (time: %v): %v", queryTime, err)
+		return nil, fmt.Errorf("fetching stock snapshots for period from DB: %w", err)
+	}
+
+	log.Printf("Stock snapshots query completed in %v", queryTime)
+	return stocks, nil
+}
+
+func GetBatchPriceSnapshotsForProducts(ctx context.Context, db *sqlx.DB, productIDs []int,
+	startDate, endDate time.Time) (map[int][]models.PriceRecord, error) {
+
+	if len(productIDs) == 0 {
+		return make(map[int][]models.PriceRecord), nil
+	}
+
+	// Break the date range into smaller chunks if it's large
+	timeChunks := splitDateRange(startDate, endDate, 7) // 7-day chunks
+
+	result := make(map[int][]models.PriceRecord)
+
+	// Process each time chunk separately
+	for _, timeChunk := range timeChunks {
+		log.Printf("Processing price snapshot data from %s to %s",
+			timeChunk.Start.Format("2006-01-02"),
+			timeChunk.End.Format("2006-01-02"))
+
+		query := `
+            WITH daily_prices AS (
+                SELECT DISTINCT ON (product_id, DATE_TRUNC('day', snapshot_time))
+                    id, product_id, size_id, price, discount, club_discount, final_price, 
+                    club_final_price, currency_iso_code, tech_size_name, editable_size_price, snapshot_time as recorded_at
+                FROM price_snapshots
+                WHERE product_id = ANY($1)
+                AND snapshot_time BETWEEN $2 AND $3
+                ORDER BY product_id, DATE_TRUNC('day', snapshot_time), snapshot_time DESC
+            )
+            SELECT * FROM daily_prices
+            ORDER BY product_id, recorded_at
+        `
+
+		startTime := time.Now()
+
+		var prices []models.PriceRecord
+		err := db.SelectContext(ctx, &prices, query, pq.Array(productIDs), timeChunk.Start, timeChunk.End)
+
+		queryTime := time.Since(startTime)
+
+		if err != nil {
+			log.Printf("Error in time-chunked price snapshot query (time: %v): %v", queryTime, err)
+			return nil, fmt.Errorf("fetching price snapshots for time chunk: %w", err)
+		}
+
+		log.Printf("Time chunk price snapshot query completed in %v (products=%d, records=%d)",
+			queryTime, len(productIDs), len(prices))
+
+		// Add results to the combined result map
+		for _, price := range prices {
+			result[price.ProductID] = append(result[price.ProductID], price)
+		}
+	}
+
+	// Verify all products have data in expected time order
+	for productID, prices := range result {
+		if len(prices) > 1 {
+			// Ensure the data is sorted by time
+			sort.Slice(prices, func(i, j int) bool {
+				return prices[i].RecordedAt.Before(prices[j].RecordedAt)
+			})
+			result[productID] = prices
+		}
+	}
+
+	return result, nil
+}
+
+func GetBatchStockSnapshotsForProducts(ctx context.Context, db *sqlx.DB, productIDs []int,
+	warehouseIDs []int64, startDate, endDate time.Time) (map[int]map[int64][]models.StockRecord, error) {
+
+	if len(productIDs) == 0 || len(warehouseIDs) == 0 {
+		return make(map[int]map[int64][]models.StockRecord), nil
+	}
+
+	// Break the date range into smaller chunks
+	timeChunks := splitDateRange(startDate, endDate, 7) // 7-day chunks
+
+	result := make(map[int]map[int64][]models.StockRecord)
+
+	// Process each time chunk separately
+	for _, timeChunk := range timeChunks {
+		log.Printf("Processing stock snapshot data from %s to %s",
+			timeChunk.Start.Format("2006-01-02"),
+			timeChunk.End.Format("2006-01-02"))
+
+		query := `
+            WITH daily_stocks AS (
+                SELECT DISTINCT ON (product_id, warehouse_id, DATE_TRUNC('day', snapshot_time))
+                    id, product_id, warehouse_id, amount, snapshot_time as recorded_at
+                FROM stock_snapshots
+                WHERE product_id = ANY($1)
+                AND warehouse_id = ANY($2)
+                AND snapshot_time BETWEEN $3 AND $4
+                ORDER BY product_id, warehouse_id, DATE_TRUNC('day', snapshot_time), snapshot_time DESC
+            )
+            SELECT * FROM daily_stocks
+            ORDER BY product_id, warehouse_id, recorded_at
+        `
+
+		startTime := time.Now()
+
+		var stocks []models.StockRecord
+		err := db.SelectContext(ctx, &stocks, query, pq.Array(productIDs), pq.Array(warehouseIDs),
+			timeChunk.Start, timeChunk.End)
+
+		queryTime := time.Since(startTime)
+
+		if err != nil {
+			log.Printf("Error in time-chunked stock snapshot query (time: %v): %v", queryTime, err)
+			return nil, fmt.Errorf("fetching stock snapshots for time chunk: %w", err)
+		}
+
+		log.Printf("Time chunk stock snapshot query completed in %v (products=%d, warehouses=%d, records=%d)",
+			queryTime, len(productIDs), len(warehouseIDs), len(stocks))
+
+		// Add results to the combined result map
+		for _, stock := range stocks {
+			if _, ok := result[stock.ProductID]; !ok {
+				result[stock.ProductID] = make(map[int64][]models.StockRecord)
+			}
+			result[stock.ProductID][stock.WarehouseID] = append(
+				result[stock.ProductID][stock.WarehouseID], stock)
+		}
+	}
+
+	// Ensure data is sorted by time for each product/warehouse
+	for productID, warehouseMap := range result {
+		for warehouseID, stocks := range warehouseMap {
+			if len(stocks) > 1 {
+				sort.Slice(stocks, func(i, j int) bool {
+					return stocks[i].RecordedAt.Before(stocks[j].RecordedAt)
+				})
+				result[productID][warehouseID] = stocks
+			}
+		}
+	}
+
+	return result, nil
+}
+
+func GetLatestPriceSnapshotsForProducts(ctx context.Context, db *sqlx.DB, productIDs []int) (map[int]models.PriceRecord, error) {
+	if len(productIDs) == 0 {
+		return make(map[int]models.PriceRecord), nil
+	}
+
+	query := `
+        SELECT DISTINCT ON (product_id)
+            id, product_id, size_id, price, discount, club_discount, final_price, 
+            club_final_price, currency_iso_code, tech_size_name, editable_size_price, snapshot_time as recorded_at
+        FROM price_snapshots
+        WHERE product_id = ANY($1)
+        ORDER BY product_id, snapshot_time DESC
+    `
+
+	startTime := time.Now()
+
+	var prices []models.PriceRecord
+	err := db.SelectContext(ctx, &prices, query, pq.Array(productIDs))
+	queryTime := time.Since(startTime)
+
+	if err != nil {
+		log.Printf("Error querying latest price snapshots (time: %v): %v", queryTime, err)
+		return nil, fmt.Errorf("fetching latest price snapshots: %w", err)
+	}
+
+	log.Printf("Latest price snapshots query completed in %v (products=%d)", queryTime, len(productIDs))
+
+	result := make(map[int]models.PriceRecord)
+	for _, price := range prices {
+		result[price.ProductID] = price
+	}
+
+	return result, nil
+}
+
+// GetLatestStockSnapshotsForProducts fetches the most recent stock snapshot records for multiple products and warehouses
+func GetLatestStockSnapshotsForProducts(ctx context.Context, db *sqlx.DB, productIDs []int, warehouseIDs []int64) (map[int]map[int64]models.StockRecord, error) {
+	if len(productIDs) == 0 || len(warehouseIDs) == 0 {
+		return make(map[int]map[int64]models.StockRecord), nil
+	}
+
+	query := `
+        SELECT DISTINCT ON (product_id, warehouse_id)
+            id, product_id, warehouse_id, amount, snapshot_time as recorded_at
+        FROM stock_snapshots
+        WHERE product_id = ANY($1)
+        AND warehouse_id = ANY($2)
+        ORDER BY product_id, warehouse_id, snapshot_time DESC
+    `
+
+	startTime := time.Now()
+
+	var stocks []models.StockRecord
+	err := db.SelectContext(ctx, &stocks, query, pq.Array(productIDs), pq.Array(warehouseIDs))
+	queryTime := time.Since(startTime)
+
+	if err != nil {
+		log.Printf("Error querying latest stock snapshots (time: %v): %v", queryTime, err)
+		return nil, fmt.Errorf("fetching latest stock snapshots: %w", err)
+	}
+
+	log.Printf("Latest stock snapshots query completed in %v (products=%d, warehouses=%d)",
+		queryTime, len(productIDs), len(warehouseIDs))
+
+	result := make(map[int]map[int64]models.StockRecord)
+	for _, stock := range stocks {
+		if _, ok := result[stock.ProductID]; !ok {
+			result[stock.ProductID] = make(map[int64]models.StockRecord)
+		}
+		result[stock.ProductID][stock.WarehouseID] = stock
+	}
+
+	return result, nil
+}

@@ -160,7 +160,6 @@ func (g *PDFGenerator) createBasicPDF(orientation string) (*gopdf.GoPdf, error) 
 }
 
 func (g *PDFGenerator) GeneratePriceReportPDF(ctx context.Context, startDate, endDate time.Time, minChangePercent float64) (string, string, error) {
-
 	products, err := db.GetAllProducts(ctx, g.db)
 	if err != nil {
 		return "", "", fmt.Errorf("error getting products: %w", err)
@@ -178,7 +177,7 @@ func (g *PDFGenerator) GeneratePriceReportPDF(ctx context.Context, startDate, en
 	if g.defaultBold != fallbackFont {
 		pdf.SetFont(g.defaultBold, "", 16)
 	}
-	title := fmt.Sprintf("Отчет о ценах за период %s - %s",
+	title := fmt.Sprintf("Price Report for Period %s - %s",
 		startDate.Format("02.01.2006"),
 		endDate.Format("02.01.2006"))
 	pdf.SetX(30)
@@ -187,8 +186,8 @@ func (g *PDFGenerator) GeneratePriceReportPDF(ctx context.Context, startDate, en
 	pdf.Br(20)
 
 	headers := []string{
-		"Товар", "Артикул", "Начальная цена (коп.)", "Конечная цена (коп.)",
-		"Изменение (коп.)", "Изменение (%)", "Мин. цена (коп.)", "Макс. цена (коп.)", "Записей",
+		"Product", "Vendor Code", "Initial Price (₽)", "Final Price (₽)",
+		"Change (₽)", "Change (%)", "Min Price (₽)", "Max Price (₽)", "Records",
 	}
 
 	colWidths := []float64{120, 60, 70, 70, 70, 50, 70, 70, 50}
@@ -218,10 +217,10 @@ func (g *PDFGenerator) GeneratePriceReportPDF(ctx context.Context, startDate, en
 	productsWithSignificantChanges := 0
 
 	for _, product := range products {
-
-		prices, err := db.GetPricesForPeriod(ctx, g.db, product.ID, startDate, endDate)
+		// Use price snapshots instead of prices
+		prices, err := db.GetPriceSnapshotsForPeriod(ctx, g.db, product.ID, startDate, endDate)
 		if err != nil {
-			log.Printf("Error getting prices for product %d: %v", product.ID, err)
+			log.Printf("Error getting price snapshots for product %d: %v", product.ID, err)
 			continue
 		}
 
@@ -346,10 +345,10 @@ func (g *PDFGenerator) GeneratePriceReportPDF(ctx context.Context, startDate, en
 		}
 		pdf.SetX(30)
 		pdf.SetY(y + 20)
-		pdf.Cell(nil, fmt.Sprintf("Не найдено товаров с изменением цены более %.1f%%", minChangePercent))
+		pdf.Cell(nil, fmt.Sprintf("No products found with price changes greater than %.1f%%", minChangePercent))
 	}
 
-	filename := fmt.Sprintf("отчет_о_ценах_%s_%s.pdf",
+	filename := fmt.Sprintf("price_report_%s_%s.pdf",
 		startDate.Format("02-01-2006"),
 		endDate.Format("02-01-2006"))
 	filePath := filepath.Join(os.TempDir(), filename)
@@ -362,7 +361,6 @@ func (g *PDFGenerator) GeneratePriceReportPDF(ctx context.Context, startDate, en
 }
 
 func (g *PDFGenerator) GenerateStockReportPDF(ctx context.Context, startDate, endDate time.Time, minChangePercent float64) (string, string, error) {
-
 	products, err := db.GetAllProducts(ctx, g.db)
 	if err != nil {
 		return "", "", fmt.Errorf("error getting products: %w", err)
@@ -385,21 +383,21 @@ func (g *PDFGenerator) GenerateStockReportPDF(ctx context.Context, startDate, en
 	if g.defaultBold != fallbackFont {
 		pdf.SetFont(g.defaultBold, "", 16)
 	}
-	title := fmt.Sprintf("Отчет о запасах за период %s - %s",
+	title := fmt.Sprintf("Stock Report for Period %s - %s",
 		startDate.Format("02.01.2006"),
-		endDate.Format("02.01.2006"))
+		endDate.Format("02-01-2006"))
 	pdf.SetX(30)
 	pdf.SetY(20)
 	pdf.Cell(nil, title)
 	pdf.Br(20)
 
-	headers := []string{"Товар", "Артикул"}
+	headers := []string{"Product", "Vendor Code"}
 
 	maxWarehousesToDisplay := 5
 	displayedWarehouses := warehouses
 	if len(warehouses) > maxWarehousesToDisplay {
 		displayedWarehouses = warehouses[:maxWarehousesToDisplay]
-		headers = append(headers, "С1", "С2", "С3", "С4", "С5")
+		headers = append(headers, "W1", "W2", "W3", "W4", "W5")
 	} else {
 		for _, wh := range warehouses {
 			shortName := wh.Name
@@ -410,7 +408,7 @@ func (g *PDFGenerator) GenerateStockReportPDF(ctx context.Context, startDate, en
 		}
 	}
 
-	headers = append(headers, "Всего", "Изменение")
+	headers = append(headers, "Total", "Change")
 
 	colWidths := []float64{120, 60}
 	for range displayedWarehouses {
@@ -444,16 +442,16 @@ func (g *PDFGenerator) GenerateStockReportPDF(ctx context.Context, startDate, en
 	productsWithSignificantChanges := 0
 
 	for _, product := range products {
-
 		warehouseStocks := make(map[int64][]models.StockRecord)
 		totalInitialStock := 0
 		totalFinalStock := 0
 		hasStockData := false
 
 		for _, warehouse := range warehouses {
-			stocks, err := db.GetStocksForPeriod(ctx, g.db, product.ID, warehouse.ID, startDate, endDate)
+			// Use stock snapshots instead of stocks
+			stocks, err := db.GetStockSnapshotsForPeriod(ctx, g.db, product.ID, warehouse.ID, startDate, endDate)
 			if err != nil {
-				log.Printf("Error getting stocks for product %d, warehouse %d: %v",
+				log.Printf("Error getting stock snapshots for product %d, warehouse %d: %v",
 					product.ID, warehouse.ID, err)
 				continue
 			}
@@ -564,7 +562,6 @@ func (g *PDFGenerator) GenerateStockReportPDF(ctx context.Context, startDate, en
 	}
 
 	if productsWithSignificantChanges > 0 {
-
 		pdf.AddPage()
 		if g.defaultBold != fallbackFont {
 			pdf.SetFont(g.defaultBold, "", 14)
@@ -591,7 +588,8 @@ func (g *PDFGenerator) GenerateStockReportPDF(ctx context.Context, startDate, en
 			hasStockData := false
 
 			for _, warehouse := range warehouses {
-				stocks, err := db.GetStocksForPeriod(ctx, g.db, product.ID, warehouse.ID, startDate, endDate)
+				// Use stock snapshots instead of stocks
+				stocks, err := db.GetStockSnapshotsForPeriod(ctx, g.db, product.ID, warehouse.ID, startDate, endDate)
 				if err != nil {
 					continue
 				}
@@ -642,7 +640,6 @@ func (g *PDFGenerator) GenerateStockReportPDF(ctx context.Context, startDate, en
 		chartGap := 20.0
 
 		for _, productData := range productsToChart {
-
 			if chartY > 650 {
 				pdf.AddPage()
 				if g.defaultBold != fallbackFont {
@@ -702,7 +699,6 @@ func (g *PDFGenerator) GenerateStockReportPDF(ctx context.Context, startDate, en
 			})
 
 			if len(dailyTotals) > 1 {
-
 				chartWidth := 700.0
 				marginLeft := 50.0
 				marginBottom := 30.0
@@ -783,7 +779,6 @@ func (g *PDFGenerator) GenerateStockReportPDF(ctx context.Context, startDate, en
 
 				pdf.SetLineWidth(1)
 			} else {
-
 				if g.defaultFont != fallbackFont {
 					pdf.SetFont(g.defaultFont, "", 10)
 				}
@@ -797,7 +792,7 @@ func (g *PDFGenerator) GenerateStockReportPDF(ctx context.Context, startDate, en
 		}
 	}
 
-	filename := fmt.Sprintf("отчет_о_запасах_%s_%s.pdf",
+	filename := fmt.Sprintf("stock_report_%s_%s.pdf",
 		startDate.Format("02-01-2006"),
 		endDate.Format("02-01-2006"))
 	filePath := filepath.Join(os.TempDir(), filename)
