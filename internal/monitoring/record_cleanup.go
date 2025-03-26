@@ -68,7 +68,7 @@ func (s *RecordCleanupService) RunCleanupProcess(ctx context.Context) {
 func (s *RecordCleanupService) CleanupRecords(ctx context.Context) error {
 	log.Println("Starting records cleanup process")
 
-	// Добавляем таймаут для избежания зависаний
+	//  таймаут для избежания зависаний
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Hour)
 	defer cancel()
 
@@ -77,7 +77,7 @@ func (s *RecordCleanupService) CleanupRecords(ctx context.Context) error {
 	startOfYesterday := time.Date(yesterday.Year(), yesterday.Month(), yesterday.Day(), 0, 0, 0, 0, now.Location())
 	endOfYesterday := time.Date(yesterday.Year(), yesterday.Month(), yesterday.Day(), 23, 59, 59, 999999999, now.Location())
 
-	// Получаем список продуктов
+	//  список продуктов
 	products, err := s.getAllProducts(ctx)
 	if err != nil {
 		return fmt.Errorf("getting products for cleanup: %w", err)
@@ -1027,7 +1027,7 @@ func (s *RecordCleanupService) batchInsertStockSnapshots(ctx context.Context, sn
 	}
 
 	const maxRetries = 5
-	const smallBatchSize = 50 // Значительно меньший размер пакета
+	const smallBatchSize = 200 // Значительно меньший размер пакета
 
 	// 1. Сортируем снапшоты по идентификаторам для обеспечения постоянного порядка доступа
 	sort.Slice(snapshots, func(i, j int) bool {

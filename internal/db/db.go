@@ -766,8 +766,6 @@ func GetLatestPricesForProducts(ctx context.Context, db *sqlx.DB, productIDs []i
 		return nil, fmt.Errorf("fetching latest prices: %w", err)
 	}
 
-	log.Printf("Запрос последних цен выполнен за %v (products=%d)", queryTime, len(productIDs))
-
 	// Индексируем по product_id
 	result := make(map[int]models.PriceRecord)
 	for _, price := range prices {
@@ -803,9 +801,6 @@ func GetLatestStocksForProducts(ctx context.Context, db *sqlx.DB, productIDs []i
 		log.Printf("Ошибка запроса последних остатков (time: %v): %v", queryTime, err)
 		return nil, fmt.Errorf("fetching latest stocks: %w", err)
 	}
-
-	log.Printf("Запрос последних остатков выполнен за %v (products=%d, warehouses=%d)",
-		queryTime, len(productIDs), len(warehouseIDs))
 
 	// Индексируем по product_id и warehouse_id
 	result := make(map[int]map[int64]models.StockRecord)
