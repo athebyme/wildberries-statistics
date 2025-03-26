@@ -1503,633 +1503,148 @@ func (s *RecordCleanupService) getStockRecordsForPeriod(ctx context.Context, pro
 	return records, nil
 }
 
+type DeletionStats struct {
+	PricesDeleted    int64
+	StocksDeleted    int64
+	BatchesProcessed int64
+	StartTime        time.Time
+	LastBatchTime    time.Time
+}
+
 // Оптимизированная версия удаления старых записей
 func (s *RecordCleanupService) deleteOldRecords(ctx context.Context, retentionDate time.Time) error {
-	// Определяем окно безопасности - не трогаем данные новее 1 часа
-	safetyWindow := time.Now().Add(-1 * time.Hour)
-	if safetyWindow.Before(retentionDate) {
-		safetyWindow = retentionDate
-	}
+	log.Printf("Starting deletion of records older than %s", retentionDate.Format("2006-01-02"))
 
-	log.Printf("Cleaning up records older than %s with safety window at %s",
-		retentionDate.Format("2006-01-02 15:04:05"),
-		safetyWindow.Format("2006-01-02 15:04:05"))
+	deleteCtx, cancel := context.WithTimeout(ctx, 6*time.Hour)
+	defer cancel()
 
-	// Устанавливаем порог для значимых изменений
-	// Порог 0 означает "сохранять все изменения"
-	const (
-		defaultPriceThreshold = 0.0 // 0% - сохранять все изменения цен
-		defaultStockThreshold = 0.0 // 0% - сохранять все изменения остатков
-	)
-
-	// Запрос для интеллектуального удаления записей о ценах с учетом окна безопасности
-	priceQuery := `
-        WITH 
-        -- Первая и последняя запись за день
-        daily_boundaries AS (
-            SELECT id 
-            FROM (
-                SELECT 
-                    id,
-                    product_id,
-                    size_id,
-                    recorded_at,
-                    ROW_NUMBER() OVER (PARTITION BY product_id, size_id, DATE_TRUNC('day', recorded_at) ORDER BY recorded_at ASC) as first_row,
-                    ROW_NUMBER() OVER (PARTITION BY product_id, size_id, DATE_TRUNC('day', recorded_at) ORDER BY recorded_at DESC) as last_row
-                FROM prices
-                WHERE recorded_at < $1 
-                AND recorded_at < $3 -- Используем окно безопасности
-            ) t
-            WHERE first_row = 1 OR last_row = 1
-        ),
-        -- Записи со значительными изменениями цены или все изменения при пороге 0
-        significant_changes AS (
-            SELECT p.id
-            FROM prices p
-            JOIN (
-                SELECT 
-                    product_id, 
-                    size_id, 
-                    recorded_at,
-                    price,
-                    LAG(price) OVER (PARTITION BY product_id, size_id ORDER BY recorded_at) as prev_price
-                FROM prices
-                WHERE recorded_at < $1
-                AND recorded_at < $3 -- Используем окно безопасности
-            ) prev ON p.product_id = prev.product_id AND p.size_id = prev.size_id AND p.recorded_at = prev.recorded_at
-            WHERE 
-                prev.prev_price IS NOT NULL AND
-                (
-                    $2 <= 0 OR -- Если порог 0 или отрицательный, сохраняем все изменения
-                    (prev.price > 0 AND ABS((p.price - prev.prev_price)::float / prev.prev_price * 100) >= $2)
-                )
-        ),
-        -- Одна запись для каждого часа
-        hourly_records AS (
-            SELECT id
-            FROM (
-                SELECT 
-                    id,
-                    product_id,
-                    size_id,
-                    recorded_at,
-                    ROW_NUMBER() OVER (
-                        PARTITION BY 
-                            product_id, 
-                            size_id, 
-                            DATE_TRUNC('hour', recorded_at) 
-                        ORDER BY 
-                            ABS(EXTRACT(EPOCH FROM (recorded_at - DATE_TRUNC('hour', recorded_at))))
-                    ) as rn
-                FROM prices
-                WHERE recorded_at < $1
-                AND recorded_at < $3 -- Используем окно безопасности
-            ) t
-            WHERE rn = 1
-        ),
-        -- Все записи, которые нужно сохранить
-        records_to_keep AS (
-            SELECT id FROM daily_boundaries
-            UNION
-            SELECT id FROM significant_changes
-            UNION
-            SELECT id FROM hourly_records
-        ),
-        -- Записи, которые можно удалить
-        records_to_delete AS (
-            SELECT id 
-            FROM prices
-            WHERE recorded_at < $1
-            AND recorded_at < $3 -- Используем окно безопасности
-            AND id NOT IN (SELECT id FROM records_to_keep)
-            LIMIT 50000
-        )
-        -- Удаляем только отобранные записи
-        DELETE FROM prices 
-        WHERE id IN (SELECT id FROM records_to_delete)
-    `
-
-	// Аналогичный запрос для очистки остатков (stocks), также с окном безопасности
-	stockQuery := `
-        WITH 
-        -- Первая и последняя запись за день
-        daily_boundaries AS (
-            SELECT id 
-            FROM (
-                SELECT 
-                    id,
-                    product_id,
-                    warehouse_id,
-                    recorded_at,
-                    ROW_NUMBER() OVER (PARTITION BY product_id, warehouse_id, DATE_TRUNC('day', recorded_at) ORDER BY recorded_at ASC) as first_row,
-                    ROW_NUMBER() OVER (PARTITION BY product_id, warehouse_id, DATE_TRUNC('day', recorded_at) ORDER BY recorded_at DESC) as last_row
-                FROM stocks
-                WHERE recorded_at < $1
-                AND recorded_at < $3 -- Используем окно безопасности
-            ) t
-            WHERE first_row = 1 OR last_row = 1
-        ),
-        -- Записи со значительными изменениями остатков или все изменения при пороге 0
-        significant_changes AS (
-            SELECT s.id
-            FROM stocks s
-            JOIN (
-                SELECT 
-                    product_id, 
-                    warehouse_id, 
-                    recorded_at,
-                    amount,
-                    LAG(amount) OVER (PARTITION BY product_id, warehouse_id ORDER BY recorded_at) as prev_amount
-                FROM stocks
-                WHERE recorded_at < $1
-                AND recorded_at < $3 -- Используем окно безопасности
-            ) prev ON s.product_id = prev.product_id AND s.warehouse_id = prev.warehouse_id AND s.recorded_at = prev.recorded_at
-            WHERE 
-                prev.prev_amount IS NOT NULL AND
-                (
-                    $2 <= 0 OR -- Если порог 0 или отрицательный, сохраняем все изменения
-                    (prev.prev_amount > 0 AND ABS((s.amount - prev.prev_amount)::float / prev.prev_amount * 100) >= $2)
-                )
-        ),
-        -- Одна запись для каждого часа
-        hourly_records AS (
-            SELECT id
-            FROM (
-                SELECT 
-                    id,
-                    product_id,
-                    warehouse_id,
-                    recorded_at,
-                    ROW_NUMBER() OVER (
-                        PARTITION BY 
-                            product_id, 
-                            warehouse_id, 
-                            DATE_TRUNC('hour', recorded_at) 
-                        ORDER BY 
-                            ABS(EXTRACT(EPOCH FROM (recorded_at - DATE_TRUNC('hour', recorded_at))))
-                    ) as rn
-                FROM stocks
-                WHERE recorded_at < $1
-                AND recorded_at < $3 -- Используем окно безопасности
-            ) t
-            WHERE rn = 1
-        ),
-        -- Все записи, которые нужно сохранить
-        records_to_keep AS (
-            SELECT id FROM daily_boundaries
-            UNION
-            SELECT id FROM significant_changes
-            UNION
-            SELECT id FROM hourly_records
-        ),
-        -- Записи, которые можно удалить
-        records_to_delete AS (
-            SELECT id 
-            FROM stocks
-            WHERE recorded_at < $1
-            AND recorded_at < $3 -- Используем окно безопасности
-            AND id NOT IN (SELECT id FROM records_to_keep)
-            LIMIT 50000
-        )
-        -- Удаляем только отобранные записи
-        DELETE FROM stocks 
-        WHERE id IN (SELECT id FROM records_to_delete)
-    `
-
-	// Выполняем запрос для цен с изоляцией READ COMMITTED
-	tx, err := s.db.BeginTxx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
+	priceStats, err := s.deleteOldPriceRecords(deleteCtx, retentionDate)
 	if err != nil {
-		return fmt.Errorf("starting transaction for prices: %w", err)
+		return fmt.Errorf("error deleting old price records: %w", err)
 	}
 
-	priceResult, err := tx.ExecContext(ctx, priceQuery, retentionDate, defaultPriceThreshold, safetyWindow)
+	stockStats, err := s.deleteOldStockRecords(deleteCtx, retentionDate)
 	if err != nil {
-		tx.Rollback()
-		return fmt.Errorf("deleting old price records: %w", err)
+		return fmt.Errorf("error deleting old stock records: %w", err)
 	}
 
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("committing price deletion transaction: %w", err)
-	}
+	log.Printf("Record cleanup completed. Deleted %d price records in %d batches, %d stock records in %d batches",
+		priceStats.PricesDeleted, priceStats.BatchesProcessed,
+		stockStats.StocksDeleted, stockStats.BatchesProcessed)
 
-	priceRows, _ := priceResult.RowsAffected()
-	log.Printf("Deleted %d old price records while preserving important data (safety window: %s)",
-		priceRows, safetyWindow.Format("2006-01-02 15:04:05"))
-
-	// Если были удалены записи, продолжаем удалять пакетами
-	if priceRows > 0 {
-		go s.continueIntelligentDeleteOldPrices(context.Background(), retentionDate, defaultPriceThreshold, safetyWindow)
-	}
-
-	// Выполняем запрос для остатков с изоляцией READ COMMITTED
-	stockTx, err := s.db.BeginTxx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
-	if err != nil {
-		return fmt.Errorf("starting transaction for stocks: %w", err)
-	}
-
-	stockResult, err := stockTx.ExecContext(ctx, stockQuery, retentionDate, defaultStockThreshold, safetyWindow)
-	if err != nil {
-		stockTx.Rollback()
-		return fmt.Errorf("deleting old stock records: %w", err)
-	}
-
-	if err := stockTx.Commit(); err != nil {
-		return fmt.Errorf("committing stock deletion transaction: %w", err)
-	}
-
-	stockRows, _ := stockResult.RowsAffected()
-	log.Printf("Deleted %d old stock records while preserving important data (safety window: %s)",
-		stockRows, safetyWindow.Format("2006-01-02 15:04:05"))
-
-	// Если были удалены записи, продолжаем удалять пакетами
-	if stockRows > 0 {
-		go s.continueIntelligentDeleteOldStocks(context.Background(), retentionDate, defaultStockThreshold, safetyWindow)
-	}
-
-	log.Printf("Started intelligent background deletion of old records older than %s with safety window at %s",
-		retentionDate.Format("2006-01-02"),
-		safetyWindow.Format("2006-01-02 15:04:05"))
 	return nil
 }
 
-// Продолжение интеллектуального удаления старых цен в фоне
-func (s *RecordCleanupService) continueIntelligentDeleteOldPrices(ctx context.Context, retentionDate time.Time, priceThreshold float64, safetyWindow time.Time) {
-	// Создаем новый контекст с таймаутом
-	ctx, cancel := context.WithTimeout(ctx, 1*time.Hour)
-	defer cancel()
+func (s *RecordCleanupService) deleteOldPriceRecords(ctx context.Context, retentionDate time.Time) (*DeletionStats, error) {
+	stats := &DeletionStats{
+		StartTime: time.Now(),
+	}
+
+	batchSize := 50000
 
 	for {
-		// Проверяем контекст перед выполнением операции
 		select {
 		case <-ctx.Done():
-			log.Printf("Background price deletion stopped: %v", ctx.Err())
-			return
+			return stats, ctx.Err()
 		default:
-			// продолжаем
 		}
 
-		// Обновляем окно безопасности, если прошло достаточно времени
-		currentSafetyWindow := time.Now().Add(-1 * time.Hour)
-		if currentSafetyWindow.Before(safetyWindow) {
-			currentSafetyWindow = safetyWindow
-		}
+		batchCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 
-		// Тот же запрос, что и в основном методе, но с обновленным окном безопасности
-		query := `
-            WITH 
-            daily_boundaries AS (
-                SELECT id 
-                FROM (
-                    SELECT 
-                        id,
-                        product_id,
-                        size_id,
-                        recorded_at,
-                        ROW_NUMBER() OVER (PARTITION BY product_id, size_id, DATE_TRUNC('day', recorded_at) ORDER BY recorded_at ASC) as first_row,
-                        ROW_NUMBER() OVER (PARTITION BY product_id, size_id, DATE_TRUNC('day', recorded_at) ORDER BY recorded_at DESC) as last_row
-                    FROM prices
-                    WHERE recorded_at < $1
-                    AND recorded_at < $3
-                ) t
-                WHERE first_row = 1 OR last_row = 1
-            ),
-            significant_changes AS (
-                SELECT p.id
-                FROM prices p
-                JOIN (
-                    SELECT 
-                        product_id, 
-                        size_id, 
-                        recorded_at,
-                        price,
-                        LAG(price) OVER (PARTITION BY product_id, size_id ORDER BY recorded_at) as prev_price
-                    FROM prices
-                    WHERE recorded_at < $1
-                    AND recorded_at < $3
-                ) prev ON p.product_id = prev.product_id AND p.size_id = prev.size_id AND p.recorded_at = prev.recorded_at
-                WHERE 
-                    prev.prev_price IS NOT NULL AND
-                    (
-                        $2 <= 0 OR
-                        (prev.price > 0 AND ABS((p.price - prev.prev_price)::float / prev.prev_price * 100) >= $2)
-                    )
-            ),
-            hourly_records AS (
-                SELECT id
-                FROM (
-                    SELECT 
-                        id,
-                        product_id,
-                        size_id,
-                        recorded_at,
-                        ROW_NUMBER() OVER (
-                            PARTITION BY 
-                                product_id, 
-                                size_id, 
-                                DATE_TRUNC('hour', recorded_at) 
-                            ORDER BY 
-                                ABS(EXTRACT(EPOCH FROM (recorded_at - DATE_TRUNC('hour', recorded_at))))
-                        ) as rn
-                    FROM prices
-                    WHERE recorded_at < $1
-                    AND recorded_at < $3
-                ) t
-                WHERE rn = 1
-            ),
-            records_to_keep AS (
-                SELECT id FROM daily_boundaries
-                UNION
-                SELECT id FROM significant_changes
-                UNION
-                SELECT id FROM hourly_records
-            ),
-            records_to_delete AS (
-                SELECT id 
-                FROM prices
-                WHERE recorded_at < $1
-                AND recorded_at < $3
-                AND id NOT IN (SELECT id FROM records_to_keep)
-                LIMIT 50000
-            )
-            DELETE FROM prices 
-            WHERE id IN (SELECT id FROM records_to_delete)
-        `
+		result, err := s.db.ExecContext(batchCtx, `
+			WITH old_price_ids AS (
+				SELECT id FROM prices 
+				WHERE recorded_at < $1
+				LIMIT $2
+			)
+			DELETE FROM prices WHERE id IN (SELECT id FROM old_price_ids)
+		`, retentionDate, batchSize)
 
-		// Используем транзакцию с уровнем изоляции READ COMMITTED
-		tx, err := s.db.BeginTxx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
+		cancel()
+
 		if err != nil {
-			log.Printf("Error starting transaction for background price deletion: %v", err)
-			return
+			return stats, fmt.Errorf("batch deleting old price records: %w", err)
 		}
 
-		result, err := tx.ExecContext(ctx, query, retentionDate, priceThreshold, currentSafetyWindow)
-		if err != nil {
-			tx.Rollback()
-			log.Printf("Error during intelligent background price deletion: %v", err)
-			return
+		rowsAffected, _ := result.RowsAffected()
+		stats.PricesDeleted += rowsAffected
+		stats.BatchesProcessed++
+		stats.LastBatchTime = time.Now()
+
+		log.Printf("Deleted batch of %d old price records (total: %d)",
+			rowsAffected, stats.PricesDeleted)
+
+		if rowsAffected == 0 {
+			break
 		}
 
-		if err := tx.Commit(); err != nil {
-			log.Printf("Error committing background price deletion: %v", err)
-			return
-		}
-
-		rows, _ := result.RowsAffected()
-		if rows == 0 {
-			log.Printf("Intelligent background price deletion completed")
-			return
-		}
-
-		log.Printf("Deleted additional %d old price records while preserving important data (safety window: %s)",
-			rows, currentSafetyWindow.Format("2006-01-02 15:04:05"))
-
-		// Пауза между пакетами для снижения нагрузки на БД
 		select {
-		case <-time.After(1 * time.Second):
-			// продолжаем после паузы
+		case <-time.After(500 * time.Millisecond):
 		case <-ctx.Done():
-			log.Printf("Background price deletion stopped: %v", ctx.Err())
-			return
+			return stats, ctx.Err()
 		}
 	}
+
+	duration := time.Since(stats.StartTime)
+	log.Printf("Price records deletion completed. Total deleted: %d in %s",
+		stats.PricesDeleted, duration)
+
+	return stats, nil
 }
 
-// Продолжение интеллектуального удаления старых остатков в фоне
-func (s *RecordCleanupService) continueIntelligentDeleteOldStocks(ctx context.Context, retentionDate time.Time, stockThreshold float64, safetyWindow time.Time) {
-	// Создаем новый контекст с таймаутом
-	ctx, cancel := context.WithTimeout(ctx, 1*time.Hour)
-	defer cancel()
+func (s *RecordCleanupService) deleteOldStockRecords(ctx context.Context, retentionDate time.Time) (*DeletionStats, error) {
+	stats := &DeletionStats{
+		StartTime: time.Now(),
+	}
+
+	batchSize := 50000
 
 	for {
-		// Проверяем контекст перед выполнением операции
 		select {
 		case <-ctx.Done():
-			log.Printf("Background stock deletion stopped: %v", ctx.Err())
-			return
+			return stats, ctx.Err()
 		default:
-			// продолжаем
 		}
 
-		// Обновляем окно безопасности, если прошло достаточно времени
-		currentSafetyWindow := time.Now().Add(-1 * time.Hour)
-		if currentSafetyWindow.Before(safetyWindow) {
-			currentSafetyWindow = safetyWindow
-		}
+		batchCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 
-		// Тот же запрос, что и в основном методе, но с обновленным окном безопасности
-		query := `
-            WITH 
-            daily_boundaries AS (
-                SELECT id 
-                FROM (
-                    SELECT 
-                        id,
-                        product_id,
-                        warehouse_id,
-                        recorded_at,
-                        ROW_NUMBER() OVER (PARTITION BY product_id, warehouse_id, DATE_TRUNC('day', recorded_at) ORDER BY recorded_at ASC) as first_row,
-                        ROW_NUMBER() OVER (PARTITION BY product_id, warehouse_id, DATE_TRUNC('day', recorded_at) ORDER BY recorded_at DESC) as last_row
-                    FROM stocks
-                    WHERE recorded_at < $1
-                    AND recorded_at < $3
-                ) t
-                WHERE first_row = 1 OR last_row = 1
-            ),
-            significant_changes AS (
-                SELECT s.id
-                FROM stocks s
-                JOIN (
-                    SELECT 
-                        product_id, 
-                        warehouse_id, 
-                        recorded_at,
-                        amount,
-                        LAG(amount) OVER (PARTITION BY product_id, warehouse_id ORDER BY recorded_at) as prev_amount
-                    FROM stocks
-                    WHERE recorded_at < $1
-                    AND recorded_at < $3
-                ) prev ON s.product_id = prev.product_id AND s.warehouse_id = prev.warehouse_id AND s.recorded_at = prev.recorded_at
-                WHERE 
-                    prev.prev_amount IS NOT NULL AND
-                    (
-                        $2 <= 0 OR
-                        (prev.prev_amount > 0 AND ABS((s.amount - prev.prev_amount)::float / prev.prev_amount * 100) >= $2)
-                    )
-            ),
-            hourly_records AS (
-                SELECT id
-                FROM (
-                    SELECT 
-                        id,
-                        product_id,
-                        warehouse_id,
-                        recorded_at,
-                        ROW_NUMBER() OVER (
-                            PARTITION BY 
-                                product_id, 
-                                warehouse_id, 
-                                DATE_TRUNC('hour', recorded_at) 
-                            ORDER BY 
-                                ABS(EXTRACT(EPOCH FROM (recorded_at - DATE_TRUNC('hour', recorded_at))))
-                        ) as rn
-                    FROM stocks
-                    WHERE recorded_at < $1
-                    AND recorded_at < $3
-                ) t
-                WHERE rn = 1
-            ),
-            records_to_keep AS (
-                SELECT id FROM daily_boundaries
-                UNION
-                SELECT id FROM significant_changes
-                UNION
-                SELECT id FROM hourly_records
-            ),
-            records_to_delete AS (
-                SELECT id 
-                FROM stocks
-                WHERE recorded_at < $1
-                AND recorded_at < $3
-                AND id NOT IN (SELECT id FROM records_to_keep)
-                LIMIT 50000
-            )
-            DELETE FROM stocks 
-            WHERE id IN (SELECT id FROM records_to_delete)
-        `
+		result, err := s.db.ExecContext(batchCtx, `
+			WITH old_stock_ids AS (
+				SELECT id FROM stocks 
+				WHERE recorded_at < $1
+				LIMIT $2
+			)
+			DELETE FROM stocks WHERE id IN (SELECT id FROM old_stock_ids)
+		`, retentionDate, batchSize)
 
-		// Используем транзакцию с уровнем изоляции READ COMMITTED
-		tx, err := s.db.BeginTxx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
+		cancel()
+
 		if err != nil {
-			log.Printf("Error starting transaction for background stock deletion: %v", err)
-			return
+			return stats, fmt.Errorf("batch deleting old stock records: %w", err)
 		}
 
-		result, err := tx.ExecContext(ctx, query, retentionDate, stockThreshold, currentSafetyWindow)
-		if err != nil {
-			tx.Rollback()
-			log.Printf("Error during intelligent background stock deletion: %v", err)
-			return
+		rowsAffected, _ := result.RowsAffected()
+		stats.StocksDeleted += rowsAffected
+		stats.BatchesProcessed++
+		stats.LastBatchTime = time.Now()
+
+		log.Printf("Deleted batch of %d old stock records (total: %d)",
+			rowsAffected, stats.StocksDeleted)
+
+		if rowsAffected == 0 {
+			break
 		}
 
-		if err := tx.Commit(); err != nil {
-			log.Printf("Error committing background stock deletion: %v", err)
-			return
-		}
-
-		rows, _ := result.RowsAffected()
-		if rows == 0 {
-			log.Printf("Intelligent background stock deletion completed")
-			return
-		}
-
-		log.Printf("Deleted additional %d old stock records while preserving important data (safety window: %s)",
-			rows, currentSafetyWindow.Format("2006-01-02 15:04:05"))
-
-		// Пауза между пакетами для снижения нагрузки на БД
 		select {
-		case <-time.After(1 * time.Second):
-			// продолжаем после паузы
+		case <-time.After(500 * time.Millisecond):
 		case <-ctx.Done():
-			log.Printf("Background stock deletion stopped: %v", ctx.Err())
-			return
+			return stats, ctx.Err()
 		}
 	}
-}
 
-// Продолжение удаления старых цен в фоне
-func (s *RecordCleanupService) continueDeleteOldPrices(ctx context.Context, retentionDate time.Time) {
-	// Создаем новый контекст с таймаутом
-	ctx, cancel := context.WithTimeout(ctx, 1*time.Hour)
-	defer cancel()
+	duration := time.Since(stats.StartTime)
+	log.Printf("Stock records deletion completed. Total deleted: %d in %s",
+		stats.StocksDeleted, duration)
 
-	for {
-		// Проверяем контекст перед выполнением операции
-		select {
-		case <-ctx.Done():
-			log.Printf("Background price deletion stopped: %v", ctx.Err())
-			return
-		default:
-			// продолжаем
-		}
-
-		result, err := s.db.ExecContext(ctx, `
-            WITH old_price_ids AS (
-                SELECT id FROM prices 
-                WHERE recorded_at < $1
-                LIMIT 50000
-            )
-            DELETE FROM prices WHERE id IN (SELECT id FROM old_price_ids)
-        `, retentionDate)
-
-		if err != nil {
-			log.Printf("Error during background price deletion: %v", err)
-			return
-		}
-
-		rows, _ := result.RowsAffected()
-		if rows == 0 {
-			log.Printf("Background price deletion completed")
-			return
-		}
-
-		log.Printf("Deleted additional %d old price records", rows)
-
-		// Пауза между пакетами для снижения нагрузки на БД
-		select {
-		case <-time.After(1 * time.Second):
-			// продолжаем после паузы
-		case <-ctx.Done():
-			log.Printf("Background price deletion stopped: %v", ctx.Err())
-			return
-		}
-	}
-}
-
-// Продолжение удаления старых остатков в фоне
-func (s *RecordCleanupService) continueDeleteOldStocks(ctx context.Context, retentionDate time.Time) {
-	// Создаем новый контекст с таймаутом
-	ctx, cancel := context.WithTimeout(ctx, 1*time.Hour)
-	defer cancel()
-
-	for {
-		// Проверяем контекст перед выполнением операции
-		select {
-		case <-ctx.Done():
-			log.Printf("Background stock deletion stopped: %v", ctx.Err())
-			return
-		default:
-			// продолжаем
-		}
-
-		result, err := s.db.ExecContext(ctx, `
-            WITH old_stock_ids AS (
-                SELECT id FROM stocks 
-                WHERE recorded_at < $1
-                LIMIT 50000
-            )
-            DELETE FROM stocks WHERE id IN (SELECT id FROM old_stock_ids)
-        `, retentionDate)
-
-		if err != nil {
-			log.Printf("Error during background stock deletion: %v", err)
-			return
-		}
-
-		rows, _ := result.RowsAffected()
-		if rows == 0 {
-			log.Printf("Background stock deletion completed")
-			return
-		}
-
-		log.Printf("Deleted additional %d old stock records", rows)
-
-		// Пауза между пакетами для снижения нагрузки на БД
-		select {
-		case <-time.After(1 * time.Second):
-			// продолжаем после паузы
-		case <-ctx.Done():
-			log.Printf("Background stock deletion stopped: %v", ctx.Err())
-			return
-		}
-	}
+	return stats, nil
 }
