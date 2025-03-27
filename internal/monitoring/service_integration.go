@@ -33,7 +33,7 @@ func InitializeImprovedServices(
 	cleanupService := NewRecordCleanupService(
 		db,
 		24*time.Hour,
-		30*24*time.Hour,
+		10*24*time.Hour,
 		hourlyKeeper,
 		defaultCleanupWorkers,
 	)
