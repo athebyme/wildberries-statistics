@@ -116,7 +116,7 @@ func (s *RecordCleanupService) CleanupRecords(ctx context.Context) error {
 		log.Printf("Processing batch %d of %d (%d products)", i+1, len(batches), len(batch))
 
 		// Обработка пакета с таймаутом
-		batchCtx, batchCancel := context.WithTimeout(ctx, 10*time.Minute)
+		batchCtx, batchCancel := context.WithTimeout(ctx, 100*time.Minute)
 
 		// Пакетная обработка снапшотов цен
 		priceErr := s.processBatchPrices(batchCtx, batch, startOfYesterday, endOfYesterday)
@@ -1568,7 +1568,7 @@ func (s *RecordCleanupService) deleteOldPriceRecords(ctx context.Context, retent
 		default:
 		}
 
-		batchCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+		batchCtx, cancel := context.WithTimeout(ctx, 50*time.Minute)
 
 		result, err := s.db.ExecContext(batchCtx, `
 			WITH old_price_ids AS (
@@ -1625,7 +1625,7 @@ func (s *RecordCleanupService) deleteOldStockRecords(ctx context.Context, retent
 		default:
 		}
 
-		batchCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+		batchCtx, cancel := context.WithTimeout(ctx, 50*time.Minute)
 
 		result, err := s.db.ExecContext(batchCtx, `
 			WITH old_stock_ids AS (
