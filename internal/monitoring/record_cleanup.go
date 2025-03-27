@@ -48,6 +48,8 @@ func (s *RecordCleanupService) RunCleanupProcess(ctx context.Context) {
 
 	log.Println("Record cleanup process started")
 
+	log.Printf("Retention interval set to %v", s.retentionInterval)
+
 	if err := s.CleanupRecords(ctx); err != nil {
 		log.Printf("Error during initial records cleanup: %v", err)
 	}
@@ -141,6 +143,16 @@ func (s *RecordCleanupService) CleanupRecords(ctx context.Context) error {
 
 	// Вызываем очистку старых данных
 	retentionDate := now.Add(-s.retentionInterval)
+
+	////
+	log.Printf("Will delete records older than %s", retentionDate.Format("2006-01-02 15:04:05"))
+	var count int
+	countQuery := "SELECT COUNT(*) FROM prices WHERE recorded_at < $1"
+	if err := s.db.GetContext(ctx, &count, countQuery, retentionDate); err == nil {
+		log.Printf("Found %d records to delete", count)
+	}
+	////
+
 	if err := s.deleteOldRecords(ctx, retentionDate); err != nil {
 		return fmt.Errorf("deleting old records: %w", err)
 	}
@@ -754,7 +766,7 @@ func (s *RecordCleanupService) batchInsertPriceSnapshots(ctx context.Context, sn
 	}
 
 	const maxRetries = 5
-	const smallBatchSize = 50 // Значительно меньший размер пакета
+	const smallBatchSize = 200 // Значительно меньший размер пакета
 
 	// 1. Сортируем снапшоты по идентификаторам для обеспечения постоянного порядка доступа
 	sort.Slice(snapshots, func(i, j int) bool {

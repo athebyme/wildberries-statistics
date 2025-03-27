@@ -105,9 +105,9 @@ func NewMonitoringService(cfg config.Config) (*Service, error) {
 	return &Service{
 		db:               database,
 		config:           cfg,
-		pricesLimiter:    rate.NewLimiter(rate.Every(time.Second*6/10), 1), // 10 запросов за 6 секунд
-		stocksLimiter:    rate.NewLimiter(rate.Every(time.Minute/300), 10), // 300 запросов в минуту
-		warehouseLimiter: rate.NewLimiter(rate.Every(time.Minute/300), 10), // 300 запросов в минуту
+		pricesLimiter:    rate.NewLimiter(rate.Every(time.Second*6/11), 1), // 10 запросов за 6 секунд
+		stocksLimiter:    rate.NewLimiter(rate.Every(time.Minute/200), 10), // 300 запросов в минуту
+		warehouseLimiter: rate.NewLimiter(rate.Every(time.Minute/200), 10), // 300 запросов в минуту
 		telegramBot:      telegramBot,
 		searchEngine:     searchEngine,
 		httpClient:       &client,

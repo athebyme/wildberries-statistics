@@ -928,7 +928,7 @@ func (s *Service) GetPriceChangesWithCursor(ctx context.Context, limit int, curs
             WHERE 
                 prev_price IS NOT NULL
                 AND ABS(((price - prev_price)::float / NULLIF(prev_price, 0)) * 100) >= 5
-            ORDER BY product_id, ABS(change_percent) DESC
+		ORDER BY product_id, ABS(((price - prev_price)::float / NULLIF(prev_price, 0)) * 100) DESC
         )
     `
 
