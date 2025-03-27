@@ -142,16 +142,23 @@ func (s *RecordCleanupService) CleanupRecords(ctx context.Context) error {
 	}
 
 	// Вызываем очистку старых данных
-	retentionDate := now.Add(-s.retentionInterval)
+	yesterday = now.AddDate(0, 0, -1)
+	retentionDate := time.Date(yesterday.Year(), yesterday.Month(), yesterday.Day(),
+		0, 0, 0, 0, now.Location())
 
-	////
 	log.Printf("Will delete records older than %s", retentionDate.Format("2006-01-02 15:04:05"))
-	var count int
+
+	var priceCount int
 	countQuery := "SELECT COUNT(*) FROM prices WHERE recorded_at < $1"
-	if err := s.db.GetContext(ctx, &count, countQuery, retentionDate); err == nil {
-		log.Printf("Found %d records to delete", count)
+	if err := s.db.GetContext(ctx, &priceCount, countQuery, retentionDate); err == nil {
+		log.Printf("Found %d price records to delete", priceCount)
 	}
-	////
+
+	var stockCount int
+	countQuery = "SELECT COUNT(*) FROM stocks WHERE recorded_at < $1"
+	if err := s.db.GetContext(ctx, &stockCount, countQuery, retentionDate); err == nil {
+		log.Printf("Found %d stock records to delete", stockCount)
+	}
 
 	if err := s.deleteOldRecords(ctx, retentionDate); err != nil {
 		return fmt.Errorf("deleting old records: %w", err)
