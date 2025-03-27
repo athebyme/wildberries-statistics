@@ -88,7 +88,7 @@ func (s *RecordCleanupService) CleanupRecords(ctx context.Context) error {
 	log.Printf("Found %d products to process for cleanup", len(products))
 
 	// Ограничиваем размер пакета для обработки
-	batchSize := 50
+	batchSize := 200
 
 	// Группируем товары для пакетной обработки
 	var batches [][]models.ProductRecord
