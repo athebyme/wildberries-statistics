@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log"
 	"math"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -1035,7 +1034,7 @@ type PaginatedStockChanges struct {
 }
 
 // GetStockChangesWithCursor returns stock changes with pagination and filtering
-// Highly optimized version with a different query strategy for large datasets
+// Fixed version that better handles zero thresholds and has debugging information
 func (s *Service) GetStockChangesWithCursor(ctx context.Context, limit int, cursor string, filter StockChangeFilter, forceRefresh bool) (*PaginatedStockChanges, error) {
 	// Устанавливаем короткий таймаут для ускорения ответа
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
@@ -1046,27 +1045,6 @@ func (s *Service) GetStockChangesWithCursor(ctx context.Context, limit int, curs
 	}
 	if limit > 500 {
 		limit = 500
-	}
-
-	// Формируем ключ кэша с учетом фильтров
-	var filterKey string
-	if filter.WarehouseID != nil {
-		filterKey += fmt.Sprintf("_w%d", *filter.WarehouseID)
-	}
-	if filter.MinChangePercent != nil {
-		filterKey += fmt.Sprintf("_p%.1f", *filter.MinChangePercent)
-	}
-	if filter.Since != nil {
-		filterKey += fmt.Sprintf("_s%s", filter.Since.Format("20060102"))
-	}
-
-	cacheKey := fmt.Sprintf("paginated_stock_changes_%d%s", limit, filterKey)
-
-	// Проверяем кэш, если не требуется принудительное обновление и это первая страница
-	if !forceRefresh && cursor == "" {
-		if cachedData, found := s.cache.Get(cacheKey); found {
-			return cachedData.(*PaginatedStockChanges), nil
-		}
 	}
 
 	// Разбираем курсор
@@ -1082,26 +1060,34 @@ func (s *Service) GetStockChangesWithCursor(ctx context.Context, limit int, curs
 		}
 	}
 
-	// Устанавливаем значения фильтров по умолчанию
-	sinceDate := time.Now().AddDate(0, 0, -14) // Сокращаем до 14 дней по умолчанию
+	// Устанавливаем значения фильтров по умолчанию - более агрессивно ищем данные
+	sinceDate := time.Now().AddDate(-1, 0, 0) // По умолчанию смотрим за год назад вместо 14 дней
 	if filter.Since != nil {
 		sinceDate = *filter.Since
 	}
 
-	// Минимальное процентное изменение
-	minChangePercent := 10.0 // Значение по умолчанию
-	if filter.MinChangePercent != nil && *filter.MinChangePercent > 0 {
+	// Важно! Правильно обрабатываем нулевые значения фильтров
+	var minChangePercent float64 = 0
+	if filter.MinChangePercent != nil {
 		minChangePercent = *filter.MinChangePercent
+	} else {
+		// Используем значение по умолчанию только если параметр не был указан явно
+		minChangePercent = 10.0
 	}
 
-	// Минимальное абсолютное изменение
-	minChangeAmt := 10 // Значение по умолчанию
-	if filter.MinChangeAmount != nil && *filter.MinChangeAmount > 0 {
+	var minChangeAmt int = 0
+	if filter.MinChangeAmount != nil {
 		minChangeAmt = *filter.MinChangeAmount
+	} else {
+		// Используем значение по умолчанию только если параметр не был указан явно
+		minChangeAmt = 10
 	}
 
-	// Более простой и эффективный подход к пагинации через OFFSET
-	// Использует материализованное представление изменений для оптимизации
+	// Добавляем логирование параметров для отладки
+	log.Printf("Параметры запроса: sinceDate=%v, warehouseID=%v, minChangeAmt=%d, minChangePercent=%.2f",
+		sinceDate, filter.WarehouseID, minChangeAmt, minChangePercent)
+
+	// Упрощенный запрос для диагностики - без лишней фильтрации
 	query := `
 		WITH product_latest_snapshots AS (
 			SELECT DISTINCT ON (product_id, warehouse_id) 
@@ -1181,11 +1167,21 @@ func (s *Service) GetStockChangesWithCursor(ctx context.Context, limit int, curs
 		LIMIT $6
 	`
 
+	// Для отладки - первые 10 записей из таблицы stock_snapshots
+	var debugCount int
+	debugQuery := `SELECT COUNT(*) FROM stock_snapshots WHERE ($1::bigint IS NULL OR warehouse_id = $1)`
+	err := s.db.GetContext(ctx, &debugCount, debugQuery, filter.WarehouseID)
+	if err != nil {
+		log.Printf("Ошибка подсчета записей в stock_snapshots: %v", err)
+	} else {
+		log.Printf("Найдено %d записей в stock_snapshots для warehouse_id=%v", debugCount, filter.WarehouseID)
+	}
+
 	startTime := time.Now()
 	var changes []StockChange
 
 	// Выполняем запрос
-	err := s.db.SelectContext(
+	err = s.db.SelectContext(
 		ctx,
 		&changes,
 		query,
@@ -1203,7 +1199,8 @@ func (s *Service) GetStockChangesWithCursor(ctx context.Context, limit int, curs
 		return nil, fmt.Errorf("ошибка получения изменений остатков: %w", err)
 	}
 
-	log.Printf("Запрос изменений остатков выполнен за %v (offset: %d, limit: %d)", queryTime, cursorOffset, limit)
+	log.Printf("Запрос изменений остатков выполнен за %v (offset: %d, limit: %d, найдено записей: %d)",
+		queryTime, cursorOffset, limit, len(changes))
 
 	// Определяем, есть ли еще записи
 	hasMore := false
@@ -1219,47 +1216,15 @@ func (s *Service) GetStockChangesWithCursor(ctx context.Context, limit int, curs
 		nextCursor = base64.StdEncoding.EncodeToString([]byte(strconv.Itoa(nextOffset)))
 	}
 
-	// Приблизительная оценка общего количества (без дополнительных запросов)
-	totalCount := cursorOffset + len(changes)
-	if hasMore {
-		totalCount = totalCount * 2 // Приблизительная оценка
-	}
-
 	// Создаем результат
 	result := &PaginatedStockChanges{
 		Items:      changes,
 		NextCursor: nextCursor,
 		HasMore:    hasMore,
-		TotalCount: totalCount,
-	}
-
-	// Кэшируем результат первой страницы
-	if cursor == "" {
-		s.cache.SetWithTTL(cacheKey, result, 2*time.Minute)
+		TotalCount: len(changes),
 	}
 
 	return result, nil
-}
-
-// Вспомогательные функции
-
-// Сортирует продукты по абсолютному изменению цены (от большего к меньшему)
-func sortProductsByAbsChange(products []ProductStats) {
-	sort.Slice(products, func(i, j int) bool {
-		absPriceChangeI := absFloat(products[i].PriceChange)
-		absPriceChangeJ := absFloat(products[j].PriceChange)
-
-		// Сначала сортируем по изменению цены
-		if absPriceChangeI != absPriceChangeJ {
-			return absPriceChangeI > absPriceChangeJ
-		}
-
-		// Затем по изменению остатков
-		absStockChangeI := absFloat(products[i].StockChange)
-		absStockChangeJ := absFloat(products[j].StockChange)
-
-		return absStockChangeI > absStockChangeJ
-	})
 }
 
 // Возвращает абсолютное значение float64
