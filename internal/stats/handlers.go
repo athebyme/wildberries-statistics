@@ -3,6 +3,7 @@ package stats
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"log"
 	"net/http"
 	"strconv"
@@ -368,70 +369,51 @@ func (h *Handlers) GetPriceChangesWithPagination(w http.ResponseWriter, r *http.
 	sendJSONResponse(w, result)
 }
 
-// GetStockChangesWithPagination возвращает недавние изменения остатков с поддержкой пагинации и фильтрации
-func (h *Handlers) GetStockChangesWithPagination(w http.ResponseWriter, r *http.Request) {
+func (h *Handlers) GetStockChangesWithPaginationPost(w http.ResponseWriter, r *http.Request) {
 	// Устанавливаем короткий таймаут для ускорения ответа
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
 
-	// Получаем параметры запроса
-	limitStr := r.URL.Query().Get("limit")
-	cursor := r.URL.Query().Get("cursor")
-	refresh := r.URL.Query().Get("refresh") == "true"
-
-	// Параметры фильтрации
-	warehouseIDStr := r.URL.Query().Get("warehouseId")
-	minChangePercentStr := r.URL.Query().Get("minChangePercent") // Приоритетный параметр
-	minChangeAmountStr := r.URL.Query().Get("minChangeAmount")   // Запасной параметр
-	sinceStr := r.URL.Query().Get("since")                       // Формат: YYYY-MM-DD
-
-	limit := 20 // Значение по умолчанию
-	if limitStr != "" {
-		parsedLimit, err := strconv.Atoi(limitStr)
-		if err == nil && parsedLimit > 0 {
-			limit = parsedLimit
-		}
+	// Парсим JSON из тела запроса
+	var request struct {
+		Limit            int      `json:"limit"`
+		Cursor           string   `json:"cursor"`
+		Refresh          bool     `json:"refresh"`
+		WarehouseID      *int64   `json:"warehouseId"`
+		MinChangePercent *float64 `json:"minChangePercent"`
+		MinChangeAmount  *int     `json:"minChangeAmount"`
+		Since            *string  `json:"since"`
 	}
 
-	// Снимаем жесткое ограничение на размер страницы
-	// Это позволит возвращать больше записей, если запрошено
+	// Предотвращаем чтение слишком большого тела запроса
+	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20)) // лимит в 1MB
+	if err != nil {
+		http.Error(w, "Ошибка чтения тела запроса", http.StatusBadRequest)
+		return
+	}
+	defer r.Body.Close()
+
+	if err := json.Unmarshal(body, &request); err != nil {
+		http.Error(w, "Ошибка декодирования JSON", http.StatusBadRequest)
+		return
+	}
+
+	// Настройка значений по умолчанию
+	limit := 20
+	if request.Limit > 0 {
+		limit = request.Limit
+	}
 
 	// Создаем объект фильтра
-	filter := StockChangeFilter{}
-
-	// Парсим warehouse_id
-	if warehouseIDStr != "" {
-		warehouseID, err := strconv.ParseInt(warehouseIDStr, 10, 64)
-		if err == nil {
-			filter.WarehouseID = &warehouseID
-		} else {
-			log.Printf("Ошибка парсинга warehouse_id: %v", err)
-		}
+	filter := StockChangeFilter{
+		WarehouseID:      request.WarehouseID,
+		MinChangePercent: request.MinChangePercent,
+		MinChangeAmount:  request.MinChangeAmount,
 	}
 
-	// В первую очередь парсим минимальное процентное изменение
-	if minChangePercentStr != "" {
-		minChangePercent, err := strconv.ParseFloat(minChangePercentStr, 64)
-		if err == nil && minChangePercent > 0 {
-			filter.MinChangePercent = &minChangePercent
-		} else {
-			log.Printf("Ошибка парсинга min_change_percent: %v", err)
-		}
-	}
-
-	// Парсим минимальное абсолютное изменение только если процентное не задано
-	if minChangeAmountStr != "" && filter.MinChangePercent == nil {
-		minChangeAmount, err := strconv.Atoi(minChangeAmountStr)
-		if err == nil && minChangeAmount > 0 {
-			filter.MinChangeAmount = &minChangeAmount
-		} else {
-			log.Printf("Ошибка парсинга min_change_amount: %v", err)
-		}
-	}
-
-	// Парсим дату начала периода
-	if sinceStr != "" {
-		since, err := time.Parse("2006-01-02", sinceStr)
+	// Парсим дату начала периода, если указана
+	if request.Since != nil {
+		since, err := time.Parse("2006-01-02", *request.Since)
 		if err == nil {
 			filter.Since = &since
 		} else {
@@ -443,7 +425,7 @@ func (h *Handlers) GetStockChangesWithPagination(w http.ResponseWriter, r *http.
 	startTime := time.Now()
 
 	// Получаем данные с пагинацией и фильтрацией
-	result, err := h.service.GetStockChangesWithCursor(ctx, limit, cursor, filter, refresh)
+	result, err := h.service.GetStockChangesWithCursor(ctx, limit, request.Cursor, filter, request.Refresh)
 
 	requestTime := time.Since(startTime)
 	log.Printf("API запрос изменений остатков выполнен за %v (limit=%d)", requestTime, limit)
@@ -454,11 +436,9 @@ func (h *Handlers) GetStockChangesWithPagination(w http.ResponseWriter, r *http.
 		return
 	}
 
-	// Добавляем заголовки кэширования для браузера
-	w.Header().Set("Cache-Control", "private, max-age=60")
-
 	// Отправляем ответ
-	sendJSONResponse(w, result)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(result)
 }
 
 // sendJSONResponse отправляет JSON-ответ клиенту
