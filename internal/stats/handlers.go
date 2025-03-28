@@ -43,22 +43,27 @@ func (h *Handlers) RegisterRoutes(router *mux.Router) {
 	// Обработчики API
 	statsAPI := router.PathPrefix("/api/stats").Subrouter()
 
-	statsAPI.HandleFunc("/overview", h.GetOverviewStats).Methods("GET")
-	statsAPI.HandleFunc("/products", h.GetTopProducts).Methods("GET")
+	// Применяем CORS-middleware ко всем запросам к API
+	statsAPI.Use(CORSMiddleware)
+
+	// Регистрируем маршруты с поддержкой OPTIONS для preflight-запросов
+	statsAPI.HandleFunc("/overview", h.GetOverviewStats).Methods("GET", "OPTIONS")
+	statsAPI.HandleFunc("/products", h.GetTopProducts).Methods("GET", "OPTIONS")
+
+	// Добавляем новый маршрут для получения списка складов
+	statsAPI.HandleFunc("/warehouses", h.GetWarehouses).Methods("GET", "OPTIONS")
 
 	// Добавляем новый маршрут для пагинированных запросов
-	statsAPI.HandleFunc("/stock-changes", h.GetStockChangesWithPaginationPost).Methods("POST")
-	statsAPI.HandleFunc("/price-changes", h.GetPriceChangesWithPaginationPost).Methods("POST")
+	statsAPI.HandleFunc("/stock-changes", h.GetStockChangesWithPaginationPost).Methods("POST", "OPTIONS")
+	statsAPI.HandleFunc("/price-changes", h.GetPriceChangesWithPaginationPost).Methods("POST", "OPTIONS")
 
-	statsAPI.HandleFunc("/price-history/{id}", h.GetPriceHistory).Methods("GET")
-	statsAPI.HandleFunc("/stock-history/{id}/{warehouseId}", h.GetStockHistory).Methods("GET")
-
-	statsAPI.HandleFunc("/warehouses", h.GetWarehouses).Methods("GET")
+	statsAPI.HandleFunc("/price-history/{id}", h.GetPriceHistory).Methods("GET", "OPTIONS")
+	statsAPI.HandleFunc("/stock-history/{id}/{warehouseId}", h.GetStockHistory).Methods("GET", "OPTIONS")
 
 	// Обработчик для страницы статистики (рендерит HTML-шаблон)
-	router.HandleFunc("/stats", h.StatsPage).Methods("GET")
+	router.HandleFunc("/stats", h.StatsPage).Methods("GET", "OPTIONS")
 
-	log.Println("Зарегистрированы маршруты API статистики")
+	log.Println("Зарегистрированы маршруты API статистики с поддержкой CORS")
 }
 
 // StatsPage обрабатывает запрос на страницу статистики
@@ -143,16 +148,13 @@ func (h *Handlers) RefreshCacheHandler(w http.ResponseWriter, r *http.Request) {
 		go h.service.RefreshCache(context.Background())
 	}
 
-	// Отправляем ответ
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-
+	// Отправляем ответ с поддержкой CORS
 	response := map[string]interface{}{
 		"success": true,
 		"message": "Обновление кэша запущено",
 	}
 
-	json.NewEncoder(w).Encode(response)
+	SendJSONResponseWithCORS(w, response)
 }
 
 // GetTopProducts возвращает список топовых продуктов как API
@@ -384,14 +386,8 @@ func (h *Handlers) GetPriceChangesWithPaginationPost(w http.ResponseWriter, r *h
 		return
 	}
 
-	// Формируем и отправляем ответ
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Cache-Control", "private, max-age=60")
-
-	if err := json.NewEncoder(w).Encode(result); err != nil {
-		log.Printf("Ошибка кодирования ответа: %v", err)
-		http.Error(w, "Ошибка при формировании ответа", http.StatusInternalServerError)
-	}
+	// Формируем и отправляем ответ используя SendJSONResponseWithCORS
+	SendJSONResponseWithCORS(w, result)
 }
 
 func (h *Handlers) GetStockChangesWithPaginationPost(w http.ResponseWriter, r *http.Request) {
@@ -461,9 +457,7 @@ func (h *Handlers) GetStockChangesWithPaginationPost(w http.ResponseWriter, r *h
 		return
 	}
 
-	// Отправляем ответ
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(result)
+	SendJSONResponseWithCORS(w, result)
 }
 
 // sendJSONResponse отправляет JSON-ответ клиенту
@@ -471,6 +465,44 @@ func sendJSONResponse(w http.ResponseWriter, data interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 
+	if err := json.NewEncoder(w).Encode(data); err != nil {
+		log.Printf("Ошибка при кодировании JSON: %v", err)
+		http.Error(w, "Ошибка при формировании ответа", http.StatusInternalServerError)
+		return
+	}
+}
+
+// CORSMiddleware добавляет CORS-заголовки ко всем ответам
+func CORSMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Устанавливаем CORS-заголовки
+		w.Header().Set("Access-Control-Allow-Origin", "*") // Разрешаем запросы с любых источников
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS, PUT, DELETE")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-API-Key")
+
+		// Обработка preflight-запросов
+		if r.Method == "OPTIONS" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+
+		// Продолжаем выполнение следующего обработчика
+		next.ServeHTTP(w, r)
+	})
+}
+
+// SendJSONResponseWithCORS отправляет JSON-ответ клиенту с CORS-заголовками
+func SendJSONResponseWithCORS(w http.ResponseWriter, data interface{}) {
+	// Устанавливаем CORS-заголовки
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS, PUT, DELETE")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-API-Key")
+
+	// Устанавливаем тип контента
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+
+	// Кодируем и отправляем данные
 	if err := json.NewEncoder(w).Encode(data); err != nil {
 		log.Printf("Ошибка при кодировании JSON: %v", err)
 		http.Error(w, "Ошибка при формировании ответа", http.StatusInternalServerError)
