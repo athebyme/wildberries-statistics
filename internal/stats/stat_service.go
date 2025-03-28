@@ -1036,6 +1036,7 @@ type PaginatedStockChanges struct {
 
 // GetStockChangesWithCursor returns stock changes with pagination and filtering
 // Optimized for memory efficiency with large datasets (30M+ records)
+// Now using stock_snapshots table instead of stocks table
 func (s *Service) GetStockChangesWithCursor(ctx context.Context, limit int, cursor string, filter StockChangeFilter, forceRefresh bool) (*PaginatedStockChanges, error) {
 	// Устанавливаем короткий таймаут для ускорения ответа
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
@@ -1141,61 +1142,65 @@ func (s *Service) GetStockChangesWithCursor(ctx context.Context, limit int, curs
 	// Добавляем минимальные пороги изменений
 	args = append(args, minChangeAmt, minChangePercent)
 
-	// Более эффективный запрос, избегающий JOIN на больших таблицах
-	// и использующий подзапросы для соединения только необходимых данных
+	// Оптимизированный запрос с использованием оконных функций
+	// для более эффективной выборки последних и предыдущих значений
 	var query string
 	if cursor == "" {
-		// Запрос для первой страницы - находим товары с наибольшими изменениями
-		// без использования JOIN и DISTINCT ON на полных таблицах
+		// Запрос для первой страницы с использованием оконных функций
 		query = `
-            WITH latest_stocks AS (
-                SELECT s1.product_id, s1.warehouse_id, s1.amount, s1.recorded_at
-                FROM stocks s1
-                WHERE s1.recorded_at >= $1
-                AND s1.recorded_at = (
-                    SELECT MAX(s2.recorded_at)
-                    FROM stocks s2
-                    WHERE s2.product_id = s1.product_id AND s2.warehouse_id = s1.warehouse_id
-                )
-                AND ($2::bigint IS NULL OR s1.warehouse_id = $2)
-                LIMIT 10000
+            WITH ranked_snapshots AS (
+                SELECT 
+                    ss.product_id,
+                    ss.warehouse_id,
+                    ss.amount,
+                    ss.snapshot_time,
+                    ROW_NUMBER() OVER(PARTITION BY ss.product_id, ss.warehouse_id ORDER BY ss.snapshot_time DESC) as rn
+                FROM stock_snapshots ss
+                WHERE ss.snapshot_time >= $1
+                AND ($2::bigint IS NULL OR ss.warehouse_id = $2)
             ),
-            previous_stocks AS (
-                SELECT s1.product_id, s1.warehouse_id, s1.amount, s1.recorded_at
-                FROM stocks s1
-                JOIN latest_stocks ls ON s1.product_id = ls.product_id AND s1.warehouse_id = ls.warehouse_id
-                WHERE s1.recorded_at < ls.recorded_at
-                AND s1.recorded_at = (
-                    SELECT MAX(s2.recorded_at)
-                    FROM stocks s2
-                    WHERE s2.product_id = s1.product_id 
-                    AND s2.warehouse_id = s1.warehouse_id
-                    AND s2.recorded_at < ls.recorded_at
-                )
+            latest_and_previous AS (
+                SELECT 
+                    l.product_id,
+                    l.warehouse_id,
+                    l.amount as new_amount,
+                    l.snapshot_time as change_date,
+                    p.amount as old_amount,
+                    p.snapshot_time as previous_date
+                FROM 
+                    (SELECT * FROM ranked_snapshots WHERE rn = 1) l
+                JOIN 
+                    (SELECT * FROM ranked_snapshots WHERE rn = 2) p 
+                ON l.product_id = p.product_id AND l.warehouse_id = p.warehouse_id
             ),
             filtered_changes AS (
                 SELECT 
-                    ls.product_id,
-                    ls.warehouse_id,
-                    ps.amount as old_amount,
-                    ls.amount as new_amount,
-                    ls.amount - ps.amount as change_amount,
+                    lp.product_id,
+                    lp.warehouse_id,
+                    lp.old_amount,
+                    lp.new_amount,
+                    lp.new_amount - lp.old_amount as change_amount,
                     CASE 
-                        WHEN ps.amount > 0 THEN ((ls.amount - ps.amount)::float / ps.amount) * 100 
-                        WHEN ps.amount = 0 AND ls.amount > 0 THEN 100
+                        WHEN lp.old_amount > 0 THEN ((lp.new_amount - lp.old_amount)::float / lp.old_amount) * 100 
+                        WHEN lp.old_amount = 0 AND lp.new_amount > 0 THEN 100
                         ELSE 0 
                     END as change_percent,
                     ABS(CASE 
-                        WHEN ps.amount > 0 THEN ((ls.amount - ps.amount)::float / ps.amount) * 100 
-                        WHEN ps.amount = 0 AND ls.amount > 0 THEN 100
+                        WHEN lp.old_amount > 0 THEN ((lp.new_amount - lp.old_amount)::float / lp.old_amount) * 100 
+                        WHEN lp.old_amount = 0 AND lp.new_amount > 0 THEN 100
                         ELSE 0 
                     END) as abs_change_percent,
-                    ls.recorded_at as change_date
-                FROM latest_stocks ls
-                JOIN previous_stocks ps ON ls.product_id = ps.product_id AND ls.warehouse_id = ps.warehouse_id
+                    lp.change_date
+                FROM latest_and_previous lp
                 WHERE 
-                    ABS(ls.amount - ps.amount) >= $3
-                    OR ABS(((ls.amount - ps.amount)::float / NULLIF(ps.amount, 0)) * 100) >= $4
+                    ABS(lp.new_amount - lp.old_amount) >= $3
+                    OR ABS(
+                        CASE 
+                            WHEN lp.old_amount > 0 THEN ((lp.new_amount - lp.old_amount)::float / lp.old_amount) * 100
+                            WHEN lp.old_amount = 0 AND lp.new_amount > 0 THEN 100
+                            ELSE 0
+                        END
+                    ) >= $4
             )
             SELECT
                 fc.product_id,
@@ -1211,78 +1216,82 @@ func (s *Service) GetStockChangesWithCursor(ctx context.Context, limit int, curs
             FROM filtered_changes fc
             JOIN products p ON fc.product_id = p.id
             JOIN warehouses w ON fc.warehouse_id = w.id
-            ORDER BY fc.abs_change_percent DESC, fc.product_id, fc.warehouse_id
+            ORDER BY fc.abs_change_percent DESC, fc.change_date DESC, fc.product_id, fc.warehouse_id
             LIMIT $5
         `
 		args = append(args, limit+1) // +1 для определения наличия следующей страницы
 	} else {
 		// Запрос для последующих страниц с использованием курсора
-		// Включаем product_id и warehouse_id в условие курсора для более эффективной пагинации
 		query = `
-            WITH latest_stocks AS (
-                SELECT s1.product_id, s1.warehouse_id, s1.amount, s1.recorded_at
-                FROM stocks s1
-                WHERE s1.recorded_at >= $1
-                AND s1.recorded_at = (
-                    SELECT MAX(s2.recorded_at)
-                    FROM stocks s2
-                    WHERE s2.product_id = s1.product_id AND s2.warehouse_id = s1.warehouse_id
-                )
-                AND ($2::bigint IS NULL OR s1.warehouse_id = $2)
-                LIMIT 10000
+            WITH ranked_snapshots AS (
+                SELECT 
+                    ss.product_id,
+                    ss.warehouse_id,
+                    ss.amount,
+                    ss.snapshot_time,
+                    ROW_NUMBER() OVER(PARTITION BY ss.product_id, ss.warehouse_id ORDER BY ss.snapshot_time DESC) as rn
+                FROM stock_snapshots ss
+                WHERE ss.snapshot_time >= $1
+                AND ($2::bigint IS NULL OR ss.warehouse_id = $2)
             ),
-            previous_stocks AS (
-                SELECT s1.product_id, s1.warehouse_id, s1.amount, s1.recorded_at
-                FROM stocks s1
-                JOIN latest_stocks ls ON s1.product_id = ls.product_id AND s1.warehouse_id = ls.warehouse_id
-                WHERE s1.recorded_at < ls.recorded_at
-                AND s1.recorded_at = (
-                    SELECT MAX(s2.recorded_at)
-                    FROM stocks s2
-                    WHERE s2.product_id = s1.product_id 
-                    AND s2.warehouse_id = s1.warehouse_id
-                    AND s2.recorded_at < ls.recorded_at
-                )
+            latest_and_previous AS (
+                SELECT 
+                    l.product_id,
+                    l.warehouse_id,
+                    l.amount as new_amount,
+                    l.snapshot_time as change_date,
+                    p.amount as old_amount,
+                    p.snapshot_time as previous_date
+                FROM 
+                    (SELECT * FROM ranked_snapshots WHERE rn = 1) l
+                JOIN 
+                    (SELECT * FROM ranked_snapshots WHERE rn = 2) p 
+                ON l.product_id = p.product_id AND l.warehouse_id = p.warehouse_id
             ),
             filtered_changes AS (
                 SELECT 
-                    ls.product_id,
-                    ls.warehouse_id,
-                    ps.amount as old_amount,
-                    ls.amount as new_amount,
-                    ls.amount - ps.amount as change_amount,
+                    lp.product_id,
+                    lp.warehouse_id,
+                    lp.old_amount,
+                    lp.new_amount,
+                    lp.new_amount - lp.old_amount as change_amount,
                     CASE 
-                        WHEN ps.amount > 0 THEN ((ls.amount - ps.amount)::float / ps.amount) * 100 
-                        WHEN ps.amount = 0 AND ls.amount > 0 THEN 100
+                        WHEN lp.old_amount > 0 THEN ((lp.new_amount - lp.old_amount)::float / lp.old_amount) * 100 
+                        WHEN lp.old_amount = 0 AND lp.new_amount > 0 THEN 100
                         ELSE 0 
                     END as change_percent,
                     ABS(CASE 
-                        WHEN ps.amount > 0 THEN ((ls.amount - ps.amount)::float / ps.amount) * 100 
-                        WHEN ps.amount = 0 AND ls.amount > 0 THEN 100
+                        WHEN lp.old_amount > 0 THEN ((lp.new_amount - lp.old_amount)::float / lp.old_amount) * 100 
+                        WHEN lp.old_amount = 0 AND lp.new_amount > 0 THEN 100
                         ELSE 0 
                     END) as abs_change_percent,
-                    ls.recorded_at as change_date
-                FROM latest_stocks ls
-                JOIN previous_stocks ps ON ls.product_id = ps.product_id AND ls.warehouse_id = ps.warehouse_id
+                    lp.change_date
+                FROM latest_and_previous lp
                 WHERE 
-                    (ABS(ls.amount - ps.amount) >= $3
-                    OR ABS(((ls.amount - ps.amount)::float / NULLIF(ps.amount, 0)) * 100) >= $4)
+                    (ABS(lp.new_amount - lp.old_amount) >= $3
+                    OR ABS(
+                        CASE 
+                            WHEN lp.old_amount > 0 THEN ((lp.new_amount - lp.old_amount)::float / lp.old_amount) * 100
+                            WHEN lp.old_amount = 0 AND lp.new_amount > 0 THEN 100
+                            ELSE 0
+                        END
+                    ) >= $4)
                     AND (
                         ABS(CASE 
-                            WHEN ps.amount > 0 THEN ((ls.amount - ps.amount)::float / ps.amount) * 100 
-                            WHEN ps.amount = 0 AND ls.amount > 0 THEN 100
+                            WHEN lp.old_amount > 0 THEN ((lp.new_amount - lp.old_amount)::float / lp.old_amount) * 100 
+                            WHEN lp.old_amount = 0 AND lp.new_amount > 0 THEN 100
                             ELSE 0 
                         END) < $5
                         OR (
                             ABS(CASE 
-                                WHEN ps.amount > 0 THEN ((ls.amount - ps.amount)::float / ps.amount) * 100 
-                                WHEN ps.amount = 0 AND ls.amount > 0 THEN 100
+                                WHEN lp.old_amount > 0 THEN ((lp.new_amount - lp.old_amount)::float / lp.old_amount) * 100 
+                                WHEN lp.old_amount = 0 AND lp.new_amount > 0 THEN 100
                                 ELSE 0 
                             END) = $5
                             AND (
-                                ls.recorded_at < $6
-                                OR (ls.recorded_at = $6 AND ls.product_id > $7)
-                                OR (ls.recorded_at = $6 AND ls.product_id = $7 AND ls.warehouse_id > $8)
+                                lp.change_date < $6
+                                OR (lp.change_date = $6 AND lp.product_id > $7)
+                                OR (lp.change_date = $6 AND lp.product_id = $7 AND lp.warehouse_id > $8)
                             )
                         )
                     )
@@ -1301,7 +1310,7 @@ func (s *Service) GetStockChangesWithCursor(ctx context.Context, limit int, curs
             FROM filtered_changes fc
             JOIN products p ON fc.product_id = p.id
             JOIN warehouses w ON fc.warehouse_id = w.id
-            ORDER BY fc.abs_change_percent DESC, fc.product_id, fc.warehouse_id
+            ORDER BY fc.abs_change_percent DESC, fc.change_date DESC, fc.product_id, fc.warehouse_id
             LIMIT $9
         `
 		args = append(args, math.Abs(lastChangePercent), lastDate, lastProductID, lastWarehouseID, limit+1)
@@ -1350,12 +1359,14 @@ func (s *Service) GetStockChangesWithCursor(ctx context.Context, limit int, curs
 	if cursor == "" && len(changes) < 10 {
 		var estimatedCount int
 		countQuery := `
-			SELECT COUNT(*) 
+			SELECT COUNT(DISTINCT product_id, warehouse_id) 
 			FROM (
-				SELECT s1.product_id, s1.warehouse_id
-				FROM stocks s1
-				WHERE s1.recorded_at >= $1
-				AND ($2::bigint IS NULL OR s1.warehouse_id = $2)
+				SELECT 
+					ss.product_id, 
+					ss.warehouse_id
+				FROM stock_snapshots ss
+				WHERE ss.snapshot_time >= $1
+				AND ($2::bigint IS NULL OR ss.warehouse_id = $2)
 				LIMIT 1000
 			) AS sample
 		`
