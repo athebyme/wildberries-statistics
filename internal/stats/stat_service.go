@@ -859,6 +859,7 @@ func (s *Service) GetPriceChangesWithCursor(ctx context.Context, limit int, curs
 }
 
 // GetPriceChangesWithCursorAndFilter возвращает изменения цен с пагинацией и фильтрацией
+// ИСПРАВЛЕННАЯ ВЕРСИЯ с корректной привязкой параметров
 func (s *Service) GetPriceChangesWithCursorAndFilter(
 	ctx context.Context,
 	limit int,
@@ -999,27 +1000,37 @@ func (s *Service) GetPriceChangesWithCursorAndFilter(
         ),
     `
 
-	// Динамически строим WHERE условие для фильтрации
+	// Динамически строим WHERE условие для фильтрации и параметры
 	whereConditions := []string{
 		"ABS(ts.new_price - ps.old_price) > 0", // Только реальные изменения
 	}
 
+	// Очень важно: начинаем с $2, так как $1 уже используется для sinceDate
+	nextParamIndex := 2
+	args := []interface{}{sinceDate} // Базовые аргументы запроса, всегда содержит sinceDate
+
 	// Добавляем условие минимального процентного изменения
 	if minChangePercent > 0 {
 		whereConditions = append(whereConditions,
-			"ABS(CASE WHEN ps.old_price > 0 THEN ((ts.new_price - ps.old_price)::float / ps.old_price) * 100 ELSE 0 END) >= $2")
+			fmt.Sprintf("ABS(CASE WHEN ps.old_price > 0 THEN ((ts.new_price - ps.old_price)::float / ps.old_price) * 100 ELSE 0 END) >= $%d", nextParamIndex))
+		args = append(args, minChangePercent)
+		nextParamIndex++
 	}
 
 	// Добавляем условие минимального абсолютного изменения
 	if minChangeAmount > 0 {
 		whereConditions = append(whereConditions,
-			"ABS(ts.new_price - ps.old_price) >= $3")
+			fmt.Sprintf("ABS(ts.new_price - ps.old_price) >= $%d", nextParamIndex))
+		args = append(args, minChangeAmount)
+		nextParamIndex++
 	}
 
 	// Добавляем условие максимального процентного изменения
 	if hasMaxPercent {
 		whereConditions = append(whereConditions,
-			"ABS(CASE WHEN ps.old_price > 0 THEN ((ts.new_price - ps.old_price)::float / ps.old_price) * 100 ELSE 0 END) <= $4")
+			fmt.Sprintf("ABS(CASE WHEN ps.old_price > 0 THEN ((ts.new_price - ps.old_price)::float / ps.old_price) * 100 ELSE 0 END) <= $%d", nextParamIndex))
+		args = append(args, maxChangePercent)
+		nextParamIndex++
 	}
 
 	// Только повышения цен
@@ -1036,7 +1047,7 @@ func (s *Service) GetPriceChangesWithCursorAndFilter(
 	whereClause := strings.Join(whereConditions, " AND ")
 
 	// Завершаем CTE блок
-	baseQueryEnd := `
+	baseQueryEnd := fmt.Sprintf(`
         all_changes AS (
             SELECT 
                 ts.product_id,
@@ -1059,7 +1070,7 @@ func (s *Service) GetPriceChangesWithCursorAndFilter(
                 ) as rn
             FROM top_snapshots ts
             JOIN previous_snapshots ps ON ts.product_id = ps.product_id AND ts.size_id = ps.size_id
-            WHERE ` + whereClause + `
+            WHERE %s
         ),
         significant_changes AS (
             SELECT DISTINCT ON (product_id)
@@ -1074,10 +1085,10 @@ func (s *Service) GetPriceChangesWithCursorAndFilter(
             FROM all_changes
             ORDER BY product_id, abs_change_percent DESC
         )
-    `
+    `, whereClause)
 
-	// Объединяем запрос
-	mainQuery := `
+	// Объединяем запрос, добавляя параметры пагинации с правильными индексами
+	mainQuery := fmt.Sprintf(`
         SELECT 
             sc.product_id,
             p.name as product_name,
@@ -1089,30 +1100,19 @@ func (s *Service) GetPriceChangesWithCursorAndFilter(
             sc.change_date
         FROM significant_changes sc
         JOIN products p ON sc.product_id = p.id
-        WHERE sc.rn > $5
+        WHERE sc.rn > $%d
         ORDER BY sc.abs_change_percent DESC, sc.change_date DESC
-        LIMIT $6
-    `
+        LIMIT $%d
+    `, nextParamIndex, nextParamIndex+1)
 
 	// Собираем полный запрос
 	query := baseQueryStart + baseQueryEnd + mainQuery
 
-	// Подготавливаем аргументы запроса
-	args := []interface{}{sinceDate}
-
-	// Добавляем параметр минимального процентного изменения
-	args = append(args, minChangePercent)
-
-	// Добавляем параметр минимального абсолютного изменения
-	args = append(args, minChangeAmount)
-
-	// Добавляем параметр максимального процентного изменения (если указан)
-	if hasMaxPercent {
-		args = append(args, maxChangePercent)
-	}
-
 	// Добавляем параметры пагинации
 	args = append(args, cursorOffset, limit+1)
+
+	// Логируем полный запрос для отладки
+	log.Printf("SQL запрос с %d параметрами, условиями: %s", len(args), whereClause)
 
 	// Запускаем запрос с логированием времени
 	startTime := time.Now()
