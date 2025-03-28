@@ -53,6 +53,8 @@ func (h *Handlers) RegisterRoutes(router *mux.Router) {
 	statsAPI.HandleFunc("/price-history/{id}", h.GetPriceHistory).Methods("GET")
 	statsAPI.HandleFunc("/stock-history/{id}/{warehouseId}", h.GetStockHistory).Methods("GET")
 
+	statsAPI.HandleFunc("/warehouses", h.GetWarehouses).Methods("GET")
+
 	// Обработчик для страницы статистики (рендерит HTML-шаблон)
 	router.HandleFunc("/stats", h.StatsPage).Methods("GET")
 
