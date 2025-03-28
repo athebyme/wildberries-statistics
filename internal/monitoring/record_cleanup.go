@@ -353,10 +353,13 @@ func (s *RecordCleanupService) ensureHourlyStockSnapshotsBatch(
 
 				if latestStock != nil {
 					snapshotsToInsert = append(snapshotsToInsert, models.StockSnapshot{
-						ProductID:    productID,
-						WarehouseID:  warehouseID,
-						Amount:       latestStock.Amount,
-						SnapshotTime: hourStart,
+						ProductID:   productID,
+						WarehouseID: warehouseID,
+						Amount:      latestStock.Amount,
+
+						SnapshotTime: time.Date(latestStock.RecordedAt.Year(), latestStock.RecordedAt.Month(),
+							latestStock.RecordedAt.Day(), latestStock.RecordedAt.Hour(), 0, 0, 0,
+							latestStock.RecordedAt.Location()),
 					})
 				}
 
@@ -749,7 +752,10 @@ func (s *RecordCleanupService) ensureHourlyPriceSnapshotsBatch(
 						CurrencyIsoCode:   latestPrice.CurrencyIsoCode,
 						TechSizeName:      latestPrice.TechSizeName,
 						EditableSizePrice: latestPrice.EditableSizePrice,
-						SnapshotTime:      hourStart,
+
+						SnapshotTime: time.Date(latestPrice.RecordedAt.Year(), latestPrice.RecordedAt.Month(),
+							latestPrice.RecordedAt.Day(), latestPrice.RecordedAt.Hour(), 0, 0, 0,
+							latestPrice.RecordedAt.Location()),
 					})
 				}
 
@@ -847,15 +853,23 @@ func (s *RecordCleanupService) insertPriceSnapshotBatchSafely(ctx context.Contex
 
 	// Прямая вставка в основную таблицу - без временных таблиц для уменьшения нагрузки
 	stmt, err := tx.PrepareContext(ctx, `
-        INSERT INTO price_snapshots (
-            product_id, size_id, price, discount, club_discount, 
-            final_price, club_final_price, currency_iso_code, 
-            tech_size_name, editable_size_price, snapshot_time
-        ) VALUES (
-            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11
-        )
-        ON CONFLICT (product_id, size_id, snapshot_time) DO NOTHING
-    `)
+    INSERT INTO price_snapshots (
+        product_id, size_id, price, discount, club_discount, 
+        final_price, club_final_price, currency_iso_code, 
+        tech_size_name, editable_size_price, snapshot_time
+    ) VALUES (
+        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11
+    )
+    ON CONFLICT (product_id, size_id, snapshot_time) DO UPDATE SET
+        price = EXCLUDED.price,
+        discount = EXCLUDED.discount,
+        club_discount = EXCLUDED.club_discount,
+        final_price = EXCLUDED.final_price,
+        club_final_price = EXCLUDED.club_final_price,
+        currency_iso_code = EXCLUDED.currency_iso_code,
+        tech_size_name = EXCLUDED.tech_size_name,
+        editable_size_price = EXCLUDED.editable_size_price
+`)
 	if err != nil {
 		return fmt.Errorf("preparing statement: %w", err)
 	}
@@ -1120,10 +1134,11 @@ func (s *RecordCleanupService) insertStockSnapshotBatchSafely(ctx context.Contex
 
 	// Прямая вставка в основную таблицу - без временных таблиц для уменьшения нагрузки
 	stmt, err := tx.PrepareContext(ctx, `
-        INSERT INTO stock_snapshots (product_id, warehouse_id, amount, snapshot_time)
-        VALUES ($1, $2, $3, $4)
-        ON CONFLICT (product_id, warehouse_id, snapshot_time) DO NOTHING
-    `)
+		INSERT INTO stock_snapshots (product_id, warehouse_id, amount, snapshot_time)
+		VALUES ($1, $2, $3, $4)
+		ON CONFLICT (product_id, warehouse_id, snapshot_time) DO UPDATE SET
+			amount = EXCLUDED.amount
+	`)
 	if err != nil {
 		return fmt.Errorf("preparing statement: %w", err)
 	}
@@ -1255,7 +1270,10 @@ func (s *RecordCleanupService) ensureHourlyPriceSnapshots(
 					CurrencyIsoCode:   latestPrice.CurrencyIsoCode,
 					TechSizeName:      latestPrice.TechSizeName,
 					EditableSizePrice: latestPrice.EditableSizePrice,
-					SnapshotTime:      hourStart,
+
+					SnapshotTime: time.Date(latestPrice.RecordedAt.Year(), latestPrice.RecordedAt.Month(),
+						latestPrice.RecordedAt.Day(), latestPrice.RecordedAt.Hour(), 0, 0, 0,
+						latestPrice.RecordedAt.Location()),
 				}
 
 				_, err = tx.ExecContext(ctx, `
@@ -1266,6 +1284,15 @@ func (s *RecordCleanupService) ensureHourlyPriceSnapshots(
 					) VALUES (
 						$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11
 					)
+					ON CONFLICT (product_id, size_id, snapshot_time) DO UPDATE SET
+						price = EXCLUDED.price,
+						discount = EXCLUDED.discount,
+						club_discount = EXCLUDED.club_discount,
+						final_price = EXCLUDED.final_price,
+						club_final_price = EXCLUDED.club_final_price,
+						currency_iso_code = EXCLUDED.currency_iso_code,
+						tech_size_name = EXCLUDED.tech_size_name,
+						editable_size_price = EXCLUDED.editable_size_price
 				`, snapshotPrice.ProductID, snapshotPrice.SizeID, snapshotPrice.Price,
 					snapshotPrice.Discount, snapshotPrice.ClubDiscount, snapshotPrice.FinalPrice,
 					snapshotPrice.ClubFinalPrice, snapshotPrice.CurrencyIsoCode,
@@ -1383,19 +1410,24 @@ func (s *RecordCleanupService) ensureHourlyStockSnapshots(
 			if snapshotExists == 0 {
 
 				snapshotStock := &models.StockSnapshot{
-					ProductID:    productID,
-					WarehouseID:  warehouseID,
-					Amount:       latestStock.Amount,
-					SnapshotTime: hourStart,
+					ProductID:   productID,
+					WarehouseID: warehouseID,
+					Amount:      latestStock.Amount,
+
+					SnapshotTime: time.Date(latestStock.RecordedAt.Year(), latestStock.RecordedAt.Month(),
+						latestStock.RecordedAt.Day(), latestStock.RecordedAt.Hour(), 0, 0, 0,
+						latestStock.RecordedAt.Location()),
 				}
 
 				_, err = tx.ExecContext(ctx, `
-					INSERT INTO stock_snapshots (
-						product_id, warehouse_id, amount, snapshot_time
-					) VALUES (
-						$1, $2, $3, $4
-					)
-				`, snapshotStock.ProductID, snapshotStock.WarehouseID, snapshotStock.Amount, snapshotStock.SnapshotTime)
+				INSERT INTO stock_snapshots (
+					product_id, warehouse_id, amount, snapshot_time
+				) VALUES (
+					$1, $2, $3, $4
+				)
+				ON CONFLICT (product_id, warehouse_id, snapshot_time) DO UPDATE SET
+					amount = EXCLUDED.amount
+			`, snapshotStock.ProductID, snapshotStock.WarehouseID, snapshotStock.Amount, snapshotStock.SnapshotTime)
 
 				if err != nil {
 					log.Printf("Error inserting hourly stock snapshot for product %d, warehouse %d, hour %s: %v",
