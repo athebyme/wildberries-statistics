@@ -430,14 +430,14 @@ func (s *Service) GetTopProducts(ctx context.Context, limit int, forceRefresh bo
 
 // PriceChange представляет значительное изменение цены
 type PriceChange struct {
-	ProductID     int       `json:"productId"`
-	ProductName   string    `json:"productName"`
-	VendorCode    string    `json:"vendorCode"`
-	OldPrice      int       `json:"oldPrice"`
-	NewPrice      int       `json:"newPrice"`
-	ChangeAmount  int       `json:"changeAmount"`
-	ChangePercent float64   `json:"changePercent"`
-	Date          time.Time `json:"date"`
+	ProductID     int       `db:"product_id" json:"productId"`
+	ProductName   string    `db:"product_name" json:"productName"`
+	VendorCode    string    `db:"vendor_code" json:"vendorCode"`
+	OldPrice      int       `db:"old_price" json:"oldPrice"`
+	NewPrice      int       `db:"new_price" json:"newPrice"`
+	ChangeAmount  int       `db:"change_amount" json:"changeAmount"`
+	ChangePercent float64   `db:"change_percent" json:"changePercent"`
+	Date          time.Time `db:"change_date" json:"date"`
 }
 
 // GetRecentPriceChanges - оптимизированная версия
