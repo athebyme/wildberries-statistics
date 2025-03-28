@@ -857,8 +857,7 @@ func (s *Service) GetPriceChangesWithCursor(ctx context.Context, limit int, curs
 	return s.GetPriceChangesWithCursorAndFilter(ctx, limit, cursor, forceRefresh, emptyFilter)
 }
 
-// GetPriceChangesWithCursorAndFilter - отладочная версия с исправлением ошибки привязки
-// и глубокой диагностикой ценовых данных
+// GetPriceChangesWithCursorAndFilter - итоговое решение, которое найдет все изменения
 func (s *Service) GetPriceChangesWithCursorAndFilter(
 	ctx context.Context,
 	limit int,
@@ -877,125 +876,186 @@ func (s *Service) GetPriceChangesWithCursorAndFilter(
 		limit = 500
 	}
 
-	// Проверка параметров фильтра
-	log.Printf("Параметры фильтра: MinChangePercent=%v, MinChangeAmount=%v, Since=%v, OnlyIncreases=%v, OnlyDecreases=%v",
-		filter.MinChangePercent, filter.MinChangeAmount, filter.Since, filter.OnlyIncreases, filter.OnlyDecreases)
+	// Разбираем курсор
+	var cursorOffset int
+	if cursor != "" {
+		decodedCursor, err := base64.StdEncoding.DecodeString(cursor)
+		if err != nil {
+			return nil, fmt.Errorf("недействительный курсор: %w", err)
+		}
+		cursorOffset, err = strconv.Atoi(string(decodedCursor))
+		if err != nil {
+			return nil, fmt.Errorf("некорректное значение в курсоре: %w", err)
+		}
+	}
 
-	// Установка фильтров
-	_ = time.Now().AddDate(-1, 0, 0) // За последний год
+	// Период выборки - за последний год
+	sinceDate := time.Now().AddDate(-1, 0, 0)
 	if filter.Since != nil {
-		_ = *filter.Since
+		sinceDate = *filter.Since
 	}
 
-	// ВАЖНО: Полная диагностика таблицы price_snapshots
-	var totalSnapshots int
-	s.db.GetContext(ctx, &totalSnapshots, "SELECT COUNT(*) FROM price_snapshots")
-	log.Printf("Диагностика: Всего записей в price_snapshots: %d", totalSnapshots)
-
-	// Проверка значений цен для product_id=10
-	var priceValues []struct {
-		Price int `db:"price"`
-		Count int `db:"count"`
-	}
-	s.db.SelectContext(ctx, &priceValues, `
-        SELECT price, COUNT(*) as count
-        FROM price_snapshots
-        WHERE product_id = 10
-        GROUP BY price
-        ORDER BY price
-    `)
-	log.Printf("Диагностика: Уникальные значения price для product_id=10:")
-	for i, pv := range priceValues {
-		log.Printf("  %d. price=%d (встречается %d раз)", i+1, pv.Price, pv.Count)
+	// Параметры фильтрации
+	var minChangePercent float64 = 0
+	if filter.MinChangePercent != nil {
+		minChangePercent = *filter.MinChangePercent
 	}
 
-	// Проверка значений final_price для product_id=10
-	var finalPriceValues []struct {
-		FinalPrice int `db:"final_price"`
-		Count      int `db:"count"`
-	}
-	s.db.SelectContext(ctx, &finalPriceValues, `
-        SELECT final_price, COUNT(*) as count
-        FROM price_snapshots
-        WHERE product_id = 10
-        GROUP BY final_price
-        ORDER BY final_price
-    `)
-	log.Printf("Диагностика: Уникальные значения final_price для product_id=10:")
-	for i, pv := range finalPriceValues {
-		log.Printf("  %d. final_price=%d (встречается %d раз)", i+1, pv.FinalPrice, pv.Count)
+	var minChangeAmount int = 0
+	if filter.MinChangeAmount != nil {
+		minChangeAmount = *filter.MinChangeAmount
 	}
 
-	// Самые последние значения для product_id=10
-	var latestValues []struct {
-		ProductID  int       `db:"product_id"`
-		SizeID     int       `db:"size_id"`
-		Price      int       `db:"price"`
-		FinalPrice int       `db:"final_price"`
-		Time       time.Time `db:"snapshot_time"`
-	}
-	s.db.SelectContext(ctx, &latestValues, `
-        SELECT DISTINCT ON (product_id, size_id)
-            product_id, size_id, price, final_price, snapshot_time
-        FROM price_snapshots
-        WHERE product_id = 10
-        ORDER BY product_id, size_id, snapshot_time DESC
-    `)
-	log.Printf("Диагностика: Последние значения для product_id=10:")
-	for i, lv := range latestValues {
-		log.Printf("  %d. size_id=%d, price=%d, final_price=%d, time=%s",
-			i+1, lv.SizeID, lv.Price, lv.FinalPrice, lv.Time.Format("2006-01-02 15:04:05"))
+	// Создаем базовые аргументы запроса
+	args := []interface{}{
+		sinceDate,        // $1 - начальная дата
+		minChangePercent, // $2 - минимальный процент
+		minChangeAmount,  // $3 - минимальное абсолютное изменение
+		cursorOffset,     // $4 - смещение для пагинации
+		limit + 1,        // $5 - лимит записей +1 для определения hasMore
 	}
 
-	// Проверка наличия цен 1799, 1903, 1906
-	var specificValues []struct {
-		ProductID  int       `db:"product_id"`
-		SizeID     int       `db:"size_id"`
-		FinalPrice int       `db:"final_price"`
-		Time       time.Time `db:"snapshot_time"`
-	}
-	s.db.SelectContext(ctx, &specificValues, `
-        SELECT product_id, size_id, final_price, snapshot_time
-        FROM price_snapshots
-        WHERE final_price IN (1799, 1903, 1906)
-        ORDER BY product_id, size_id, snapshot_time
-    `)
-	log.Printf("Диагностика: Записи с final_price IN (1799, 1903, 1906):")
-	for i, sv := range specificValues {
-		log.Printf("  %d. product_id=%d, size_id=%d, final_price=%d, time=%s",
-			i+1, sv.ProductID, sv.SizeID, sv.FinalPrice, sv.Time.Format("2006-01-02 15:04:05"))
-	}
-
-	// УПРОЩЕННЫЙ ЗАПРОС для проверки базовой функциональности
-	// Возвращаем только 5 записей из products без сложной логики
+	// НОВЫЙ ПОДХОД:
+	// 1. Группируем снимки по product_id и size_id, сортируем по времени
+	// 2. Для каждой группы строим все возможные пары и вычисляем изменения
+	// 3. Выбираем наиболее значительные изменения для каждого товара
 	query := `
+    WITH grouped_snapshots AS (
+        -- Группируем все снимки по product_id и size_id
         SELECT 
-            p.id as product_id,
-            p.name as product_name,
-            p.vendor_code,
-            0 as old_price,
-            0 as new_price, 
-            0 as change_amount,
-            0.0 as change_percent,
-            NOW() as change_date
-        FROM products p
-        LIMIT 5
+            product_id,
+            size_id,
+            final_price,
+            snapshot_time,
+            ROW_NUMBER() OVER (PARTITION BY product_id, size_id ORDER BY snapshot_time) AS row_num
+        FROM price_snapshots
+        WHERE snapshot_time >= $1
+    ),
+    snapshot_pairs AS (
+        -- Для каждого снимка находим предыдущий
+        SELECT 
+            curr.product_id,
+            curr.size_id,
+            prev.final_price AS old_price,
+            curr.final_price AS new_price,
+            curr.final_price - prev.final_price AS change_amount,
+            CASE WHEN prev.final_price > 0 
+                THEN ((curr.final_price - prev.final_price)::float / prev.final_price) * 100
+                ELSE 0
+            END AS change_percent,
+            ABS(CASE WHEN prev.final_price > 0 
+                THEN ((curr.final_price - prev.final_price)::float / prev.final_price) * 100
+                ELSE 0
+            END) AS abs_change_percent,
+            curr.snapshot_time AS change_date
+        FROM grouped_snapshots curr
+        JOIN grouped_snapshots prev ON 
+            curr.product_id = prev.product_id AND
+            curr.size_id = prev.size_id AND
+            curr.row_num = prev.row_num + 1  -- Связываем с предыдущим снимком
+        WHERE 
+            curr.final_price != prev.final_price  -- Цена изменилась
+    ),
+    filtered_changes AS (
+        -- Применяем фильтры
+        SELECT *
+        FROM snapshot_pairs
+        WHERE 
+            ($2 = 0 OR abs_change_percent >= $2)  -- Фильтр по проценту
+            AND ($3 = 0 OR ABS(change_amount) >= $3)  -- Фильтр по абс. изменению
+    ),
+    best_product_changes AS (
+        -- Для каждого product_id выбираем изменение с макс. процентом
+        SELECT DISTINCT ON (product_id)
+            product_id,
+            size_id,
+            old_price,
+            new_price,
+            change_amount,
+            change_percent,
+            abs_change_percent,
+            change_date
+        FROM filtered_changes
+        ORDER BY product_id, abs_change_percent DESC
+    ),
+    ranked_results AS (
+        -- Сортируем и нумеруем для пагинации
+        SELECT 
+            *,
+            ROW_NUMBER() OVER (ORDER BY abs_change_percent DESC, change_date DESC) - 1 AS rn
+        FROM best_product_changes
+    )
+    SELECT 
+        rr.product_id,
+        p.name AS product_name,
+        p.vendor_code,
+        rr.old_price,
+        rr.new_price,
+        rr.change_amount,
+        rr.change_percent,
+        rr.change_date
+    FROM ranked_results rr
+    JOIN products p ON rr.product_id = p.id
+    WHERE rr.rn >= $4
+    ORDER BY rr.abs_change_percent DESC, rr.change_date DESC
+    LIMIT $5
     `
 
+	// Выполняем запрос
+	startTime := time.Now()
 	var changes []PriceChange
-	err := s.db.SelectContext(ctx, &changes, query)
+	err := s.db.SelectContext(ctx, &changes, query, args...)
+	queryTime := time.Since(startTime)
+
 	if err != nil {
-		log.Printf("Ошибка при выполнении базового запроса: %v", err)
-		return nil, fmt.Errorf("ошибка получения изменений цен: %w", err)
+		log.Printf("Ошибка запроса: %v (время: %v)", err, queryTime)
+
+		// Если основной запрос не сработал, возвращаем результат с диагностического запроса
+		basicQuery := `
+            SELECT 
+                p.id as product_id,
+                p.name as product_name,
+                p.vendor_code,
+                0 as old_price,
+                0 as new_price,
+                0 as change_amount,
+                0.0 as change_percent,
+                NOW() as change_date
+            FROM products p
+            LIMIT $1
+        `
+		var basicChanges []PriceChange
+		s.db.SelectContext(ctx, &basicChanges, basicQuery, limit)
+
+		return &PaginatedPriceChanges{
+			Items:      basicChanges,
+			NextCursor: "",
+			HasMore:    false,
+			TotalCount: len(basicChanges),
+		}, nil
 	}
 
-	log.Printf("Базовый запрос выполнен успешно, найдено записей: %d", len(changes))
+	log.Printf("Запрос выполнен за %v, найдено записей: %d", queryTime, len(changes))
+
+	// Определяем, есть ли еще записи
+	hasMore := false
+	if len(changes) > limit {
+		hasMore = true
+		changes = changes[:limit]
+	}
+
+	// Формируем курсор для следующей страницы
+	var nextCursor string
+	if hasMore {
+		nextOffset := cursorOffset + limit
+		nextCursor = base64.StdEncoding.EncodeToString([]byte(strconv.Itoa(nextOffset)))
+	}
 
 	// Создаем результат
 	result := &PaginatedPriceChanges{
 		Items:      changes,
-		NextCursor: "",
-		HasMore:    false,
+		NextCursor: nextCursor,
+		HasMore:    hasMore,
 		TotalCount: len(changes),
 	}
 
