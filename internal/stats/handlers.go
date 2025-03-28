@@ -37,7 +37,7 @@ func (h *Handlers) RegisterRoutes(router *mux.Router) {
 	statsAPI.HandleFunc("/products", h.GetTopProducts).Methods("GET")
 
 	// Добавляем новый маршрут для пагинированных запросов
-	statsAPI.HandleFunc("/stock-changes", h.GetStockChangesWithPagination).Methods("POST")
+	statsAPI.HandleFunc("/stock-changes", h.GetStockChangesWithPaginationPost).Methods("POST")
 	statsAPI.HandleFunc("/price-changes", h.GetPriceChangesWithPagination).Methods("POST")
 
 	statsAPI.HandleFunc("/price-history/{id}", h.GetPriceHistory).Methods("GET")
@@ -65,32 +65,6 @@ func (h *Handlers) StatsPage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	json.NewEncoder(w).Encode(response)
-}
-
-// RegisterAPIRoutes регистрирует API маршруты для статистики
-func (h *Handlers) RegisterAPIRoutes(router *mux.Router) {
-	// API маршруты
-	statsAPI := router.PathPrefix("/api/stats").Subrouter()
-
-	statsAPI.HandleFunc("/overview", h.GetOverviewStats).Methods("GET")
-	statsAPI.HandleFunc("/products", h.GetTopProducts).Methods("GET")
-
-	// Стандартный обработчик изменений цен (для обратной совместимости)
-	statsAPI.HandleFunc("/price-changes", h.GetPriceChanges).Methods("GET")
-
-	// Новые обработчики с пагинацией
-	statsAPI.HandleFunc("/price-changes/paginated", h.GetPriceChangesWithPagination).Methods("GET")
-
-	statsAPI.HandleFunc("/stock-changes", h.GetStockChanges).Methods("GET")
-	statsAPI.HandleFunc("/stock-changes/paginated", h.GetStockChangesWithPagination).Methods("GET")
-	statsAPI.HandleFunc("/price-history/{id}", h.GetPriceHistory).Methods("GET")
-	statsAPI.HandleFunc("/stock-history/{id}/{warehouseId}", h.GetStockHistory).Methods("GET")
-	statsAPI.HandleFunc("/warehouses", h.GetWarehouses).Methods("GET")
-
-	// Маршрут для принудительного обновления кэша
-	statsAPI.HandleFunc("/refresh-cache", h.RefreshCacheHandler).Methods("POST")
-
-	log.Println("Зарегистрированы API маршруты статистики")
 }
 
 // GetWarehouses возвращает список всех складов
