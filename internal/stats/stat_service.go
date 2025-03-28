@@ -858,7 +858,7 @@ func (s *Service) GetPriceChangesWithCursor(ctx context.Context, limit int, curs
 	return s.GetPriceChangesWithCursorAndFilter(ctx, limit, cursor, forceRefresh, emptyFilter)
 }
 
-// GetPriceChangesWithCursorAndFilter - исправленная версия с корректным включением всех полей
+// GetPriceChangesWithCursorAndFilter - исправленная версия с использованием поля price вместо final_price
 func (s *Service) GetPriceChangesWithCursorAndFilter(
 	ctx context.Context,
 	limit int,
@@ -945,38 +945,51 @@ func (s *Service) GetPriceChangesWithCursorAndFilter(
 	offsetParamIndex := len(args) - 1
 	limitParamIndex := len(args)
 
-	// Формируем основной SQL-запрос с ИСПРАВЛЕННЫМ выбором полей
+	// Проверка наличия изменений для product_id=10 (диагностика)
+	var testChanges int
+	testQuery := `
+        SELECT COUNT(*) 
+        FROM (
+            SELECT DISTINCT product_id, price 
+            FROM price_snapshots 
+            WHERE product_id = 10
+        ) AS prices
+    `
+	s.db.GetContext(ctx, &testChanges, testQuery)
+	log.Printf("Диагностика: Найдено %d различных цен для product_id=10", testChanges)
+
+	// Формируем основной SQL-запрос с ПОЛЕМ PRICE ВМЕСТО FINAL_PRICE
 	query := fmt.Sprintf(`
     WITH price_snapshot_pairs AS (
         -- Находим все пары "последний-предыдущий" снимок
         SELECT 
             newest.product_id,
             newest.size_id,
-            previous.final_price AS old_price,
-            newest.final_price AS new_price,
-            newest.final_price - previous.final_price AS price_diff,
+            previous.price AS old_price,  -- ИСПРАВЛЕНО: price вместо final_price
+            newest.price AS new_price,    -- ИСПРАВЛЕНО: price вместо final_price
+            newest.price - previous.price AS price_diff,  -- ИСПРАВЛЕНО: price вместо final_price
             CASE 
-                WHEN previous.final_price > 0 THEN 
-                    ((newest.final_price - previous.final_price)::float / previous.final_price) * 100
+                WHEN previous.price > 0 THEN 
+                    ((newest.price - previous.price)::float / previous.price) * 100  -- ИСПРАВЛЕНО: price вместо final_price
                 ELSE 0
             END AS percent_change,
             ABS(CASE 
-                WHEN previous.final_price > 0 THEN 
-                    ((newest.final_price - previous.final_price)::float / previous.final_price) * 100
+                WHEN previous.price > 0 THEN 
+                    ((newest.price - previous.price)::float / previous.price) * 100  -- ИСПРАВЛЕНО: price вместо final_price
                 ELSE 0
             END) AS abs_percent_change,
             newest.snapshot_time AS change_date
         FROM (
             -- Находим последний снимок для каждого товара/размера
             SELECT DISTINCT ON (product_id, size_id)
-                id, product_id, size_id, final_price, snapshot_time
+                id, product_id, size_id, price, snapshot_time  -- ИСПРАВЛЕНО: price вместо final_price
             FROM price_snapshots
             WHERE snapshot_time >= $1
             ORDER BY product_id, size_id, snapshot_time DESC
         ) AS newest
         JOIN (
             -- Находим предыдущий снимок для каждого товара/размера
-            SELECT ps2.id, ps2.product_id, ps2.size_id, ps2.final_price, ps2.snapshot_time
+            SELECT ps2.id, ps2.product_id, ps2.size_id, ps2.price, ps2.snapshot_time  -- ИСПРАВЛЕНО: price вместо final_price
             FROM price_snapshots ps2
             WHERE EXISTS (
                 SELECT 1 FROM (
@@ -1009,7 +1022,6 @@ func (s *Service) GetPriceChangesWithCursorAndFilter(
     ),
     ranked_changes AS (
         -- Для каждого товара берем самое значительное изменение
-        -- ИСПРАВЛЕНО: включаем abs_percent_change в результат
         SELECT DISTINCT ON (product_id)
             product_id,
             size_id,
@@ -1040,7 +1052,7 @@ func (s *Service) GetPriceChangesWithCursorAndFilter(
     `, whereClause, offsetParamIndex, limitParamIndex)
 
 	// Выводим информацию о параметрах и фильтрах
-	log.Printf("Запрос изменений цен (параметры): minPercent=%.1f, offset=%d, limit=%d, условия: %s",
+	log.Printf("Запрос изменений цен (параметры): minPercent=%.3f, offset=%d, limit=%d, условия: %s",
 		minChangePercent, cursorOffset, limit, whereClause)
 
 	// Выполняем запрос
@@ -1051,33 +1063,54 @@ func (s *Service) GetPriceChangesWithCursorAndFilter(
 
 	if err != nil {
 		log.Printf("Ошибка запроса изменений цен (время: %v): %v", queryTime, err)
-
-		// Упрощенный запрос для проверки работоспособности
-		simplifiedQuery := `
-            SELECT 
-                p.id as product_id,
-                p.name as product_name,
-                p.vendor_code,
-                0 as old_price,
-                0 as new_price,
-                0 as change_amount,
-                0.0 as change_percent,
-                NOW() as change_date
-            FROM products p
-            LIMIT 5
-        `
-		var simpleResults []PriceChange
-		simpleErr := s.db.SelectContext(ctx, &simpleResults, simplifiedQuery)
-		if simpleErr != nil {
-			log.Printf("Ошибка упрощенного запроса: %v", simpleErr)
-		} else {
-			log.Printf("Упрощенный запрос вернул %d строк", len(simpleResults))
-		}
-
 		return nil, fmt.Errorf("ошибка получения изменений цен: %w", err)
 	}
 
 	log.Printf("Запрос изменений цен выполнен за %v, найдено записей: %d", queryTime, len(changes))
+
+	// Если результат пустой, попробуем прямой запрос для product_id=10 (диагностика)
+	if len(changes) == 0 {
+		log.Printf("Диагностика: Выполняем прямой запрос для product_id=10")
+		var directChanges []struct {
+			ProductID int     `db:"product_id"`
+			OldPrice  int     `db:"old_price"`
+			NewPrice  int     `db:"new_price"`
+			ChangeAmt int     `db:"change_amount"`
+			ChangePct float64 `db:"change_percent"`
+		}
+		directQuery := `
+            WITH latest AS (
+                SELECT DISTINCT ON (product_id, size_id)
+                    product_id, size_id, price, snapshot_time
+                FROM price_snapshots
+                WHERE product_id = 10
+                ORDER BY product_id, size_id, snapshot_time DESC
+            ),
+            previous AS (
+                SELECT DISTINCT ON (l.product_id, l.size_id)
+                    l.product_id,
+                    l.price AS new_price,
+                    ps.price AS old_price,
+                    l.price - ps.price AS change_amount,
+                    CASE 
+                        WHEN ps.price > 0 THEN ((l.price - ps.price)::float / ps.price) * 100
+                        ELSE 0
+                    END AS change_percent
+                FROM latest l
+                JOIN price_snapshots ps ON 
+                    l.product_id = ps.product_id AND 
+                    l.size_id = ps.size_id AND
+                    ps.snapshot_time < l.snapshot_time
+                ORDER BY l.product_id, l.size_id, ps.snapshot_time DESC
+            )
+            SELECT * FROM previous
+        `
+		s.db.SelectContext(ctx, &directChanges, directQuery)
+		for i, change := range directChanges {
+			log.Printf("  Прямой результат %d: ProductID=%d, OldPrice=%d, NewPrice=%d, Change=%.2f%%",
+				i+1, change.ProductID, change.OldPrice, change.NewPrice, change.ChangePct)
+		}
+	}
 
 	// Определяем, есть ли еще записи
 	hasMore := false
