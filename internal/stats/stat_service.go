@@ -5,7 +5,6 @@ import (
 	"encoding/base64"
 	"fmt"
 	"log"
-	"math"
 	"strconv"
 	"strings"
 	"sync"
@@ -850,10 +849,23 @@ type PaginatedPriceChanges struct {
 	Items      []PriceChange `json:"items"`
 	NextCursor string        `json:"nextCursor,omitempty"`
 	HasMore    bool          `json:"hasMore"`
+	TotalCount int           `json:"totalCount"`
 }
 
-// Завершение GetPriceChangesWithCursor
 func (s *Service) GetPriceChangesWithCursor(ctx context.Context, limit int, cursor string, forceRefresh bool) (*PaginatedPriceChanges, error) {
+	emptyFilter := PriceChangeFilter{}
+
+	return s.GetPriceChangesWithCursorAndFilter(ctx, limit, cursor, forceRefresh, emptyFilter)
+}
+
+// GetPriceChangesWithCursorAndFilter возвращает изменения цен с пагинацией и фильтрацией
+func (s *Service) GetPriceChangesWithCursorAndFilter(
+	ctx context.Context,
+	limit int,
+	cursor string,
+	forceRefresh bool,
+	filter PriceChangeFilter,
+) (*PaginatedPriceChanges, error) {
 	// Короткий таймаут
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
@@ -861,131 +873,260 @@ func (s *Service) GetPriceChangesWithCursor(ctx context.Context, limit int, curs
 	if limit <= 0 {
 		limit = 20
 	}
-
 	if limit > 500 {
 		limit = 500
 	}
 
+	// Формируем ключ кэша с учетом фильтров
+	var filterKey string
+	if filter.MinChangePercent != nil {
+		filterKey += fmt.Sprintf("_min%.1f", *filter.MinChangePercent)
+	}
+	if filter.MaxChangePercent != nil {
+		filterKey += fmt.Sprintf("_max%.1f", *filter.MaxChangePercent)
+	}
+	if filter.MinChangeAmount != nil {
+		filterKey += fmt.Sprintf("_amt%d", *filter.MinChangeAmount)
+	}
+	if filter.Since != nil {
+		filterKey += fmt.Sprintf("_s%s", filter.Since.Format("20060102"))
+	}
+	if filter.OnlyIncreases != nil && *filter.OnlyIncreases {
+		filterKey += "_inc"
+	}
+	if filter.OnlyDecreases != nil && *filter.OnlyDecreases {
+		filterKey += "_dec"
+	}
+
 	// Проверяем кэш для первой страницы
+	cacheKey := fmt.Sprintf("paginated_price_changes_%d%s", limit, filterKey)
 	if !forceRefresh && cursor == "" {
-		cacheKey := fmt.Sprintf("paginated_price_changes_%d", limit)
 		if cachedData, found := s.cache.Get(cacheKey); found {
 			return cachedData.(*PaginatedPriceChanges), nil
 		}
 	}
 
 	// Разбираем курсор
-	var lastChangePercent float64
-	var lastDate time.Time
-
+	var cursorOffset int
 	if cursor != "" {
 		decodedCursor, err := base64.StdEncoding.DecodeString(cursor)
 		if err != nil {
 			return nil, fmt.Errorf("недействительный курсор: %w", err)
 		}
-
-		parts := strings.Split(string(decodedCursor), "|")
-		if len(parts) != 2 {
-			return nil, fmt.Errorf("недопустимый формат курсора")
-		}
-
-		lastChangePercent, err = strconv.ParseFloat(parts[0], 64)
+		cursorOffset, err = strconv.Atoi(string(decodedCursor))
 		if err != nil {
 			return nil, fmt.Errorf("некорректное значение в курсоре: %w", err)
 		}
-
-		lastDate, err = time.Parse(time.RFC3339, parts[1])
-		if err != nil {
-			return nil, fmt.Errorf("некорректная дата в курсоре: %w", err)
-		}
 	}
 
-	// Оптимизированный запрос - базовая часть запроса с оконными функциями
-	baseQuery := `
-        WITH recent_prices AS (
+	// Устанавливаем значения фильтров по умолчанию
+	sinceDate := time.Now().AddDate(0, -1, 0) // По умолчанию 1 месяц
+	if filter.Since != nil {
+		sinceDate = *filter.Since
+	}
+
+	// Минимальный процент изменения
+	var minChangePercent float64 = 5 // По умолчанию 5%
+	if filter.MinChangePercent != nil {
+		minChangePercent = *filter.MinChangePercent
+	}
+
+	// Минимальное абсолютное изменение
+	var minChangeAmount int = 0
+	if filter.MinChangeAmount != nil {
+		minChangeAmount = *filter.MinChangeAmount
+	}
+
+	// Максимальный процент изменения (если указан)
+	var hasMaxPercent bool
+	var maxChangePercent float64
+	if filter.MaxChangePercent != nil {
+		hasMaxPercent = true
+		maxChangePercent = *filter.MaxChangePercent
+	}
+
+	// Направление изменения (только повышения/понижения цен)
+	var onlyIncreases, onlyDecreases bool
+	if filter.OnlyIncreases != nil && *filter.OnlyIncreases {
+		onlyIncreases = true
+	}
+	if filter.OnlyDecreases != nil && *filter.OnlyDecreases {
+		onlyDecreases = true
+	}
+
+	// Логируем параметры запроса
+	log.Printf("Запрос изменений цен: minPercent=%.1f, minAmount=%d, since=%s, onlyInc=%v, onlyDec=%v",
+		minChangePercent, minChangeAmount, sinceDate.Format("2006-01-02"), onlyIncreases, onlyDecreases)
+
+	// Базовый запрос - первая часть CTE
+	baseQueryStart := `
+        WITH latest_price_snapshots AS (
             SELECT 
                 product_id,
-                price,
-                recorded_at,
-                LAG(price) OVER (PARTITION BY product_id ORDER BY recorded_at) AS prev_price,
-                LAG(recorded_at) OVER (PARTITION BY product_id ORDER BY recorded_at) AS prev_recorded_at
-            FROM prices
-            WHERE recorded_at > NOW() - INTERVAL '30 days'
+                size_id,
+                final_price,
+                snapshot_time,
+                ROW_NUMBER() OVER (PARTITION BY product_id, size_id ORDER BY snapshot_time DESC) as rn
+            FROM price_snapshots
+            WHERE snapshot_time >= $1
+        ),
+        top_snapshots AS (
+            SELECT 
+                product_id,
+                size_id,
+                final_price as new_price,
+                snapshot_time
+            FROM latest_price_snapshots
+            WHERE rn = 1
+        ),
+        previous_snapshots AS (
+            SELECT DISTINCT ON (lps.product_id, lps.size_id)
+                lps.product_id,
+                lps.size_id,
+                prev.final_price as old_price,
+                prev.snapshot_time as prev_time
+            FROM latest_price_snapshots lps
+            JOIN price_snapshots prev ON 
+                lps.product_id = prev.product_id AND 
+                lps.size_id = prev.size_id
+            WHERE 
+                lps.rn = 1 AND
+                prev.snapshot_time < lps.snapshot_time
+            ORDER BY 
+                lps.product_id, 
+                lps.size_id, 
+                prev.snapshot_time DESC
+        ),
+    `
+
+	// Динамически строим WHERE условие для фильтрации
+	whereConditions := []string{
+		"ABS(ts.new_price - ps.old_price) > 0", // Только реальные изменения
+	}
+
+	// Добавляем условие минимального процентного изменения
+	if minChangePercent > 0 {
+		whereConditions = append(whereConditions,
+			"ABS(CASE WHEN ps.old_price > 0 THEN ((ts.new_price - ps.old_price)::float / ps.old_price) * 100 ELSE 0 END) >= $2")
+	}
+
+	// Добавляем условие минимального абсолютного изменения
+	if minChangeAmount > 0 {
+		whereConditions = append(whereConditions,
+			"ABS(ts.new_price - ps.old_price) >= $3")
+	}
+
+	// Добавляем условие максимального процентного изменения
+	if hasMaxPercent {
+		whereConditions = append(whereConditions,
+			"ABS(CASE WHEN ps.old_price > 0 THEN ((ts.new_price - ps.old_price)::float / ps.old_price) * 100 ELSE 0 END) <= $4")
+	}
+
+	// Только повышения цен
+	if onlyIncreases {
+		whereConditions = append(whereConditions, "ts.new_price > ps.old_price")
+	}
+
+	// Только понижения цен
+	if onlyDecreases {
+		whereConditions = append(whereConditions, "ts.new_price < ps.old_price")
+	}
+
+	// Соединяем условия с AND
+	whereClause := strings.Join(whereConditions, " AND ")
+
+	// Завершаем CTE блок
+	baseQueryEnd := `
+        all_changes AS (
+            SELECT 
+                ts.product_id,
+                ts.size_id,
+                ps.old_price,
+                ts.new_price,
+                ts.new_price - ps.old_price as change_amount,
+                CASE 
+                    WHEN ps.old_price > 0 THEN ((ts.new_price - ps.old_price)::float / ps.old_price) * 100 
+                    ELSE 0 
+                END as change_percent,
+                ABS(CASE 
+                    WHEN ps.old_price > 0 THEN ((ts.new_price - ps.old_price)::float / ps.old_price) * 100 
+                    ELSE 0 
+                END) as abs_change_percent,
+                ts.snapshot_time as change_date,
+                ROW_NUMBER() OVER (ORDER BY 
+                    ABS(CASE WHEN ps.old_price > 0 THEN ((ts.new_price - ps.old_price)::float / ps.old_price) * 100 ELSE 0 END) DESC,
+                    ts.snapshot_time DESC
+                ) as rn
+            FROM top_snapshots ts
+            JOIN previous_snapshots ps ON ts.product_id = ps.product_id AND ts.size_id = ps.size_id
+            WHERE ` + whereClause + `
         ),
         significant_changes AS (
             SELECT DISTINCT ON (product_id)
                 product_id,
-                prev_price as old_price,
-                price as new_price,
-                price - prev_price as change_amount,
-                CASE 
-                    WHEN prev_price > 0 THEN ((price - prev_price)::float / prev_price) * 100 
-                    ELSE 0 
-                END as change_percent,
-                recorded_at as change_date
-            FROM recent_prices
-            WHERE 
-                prev_price IS NOT NULL
-                AND ABS(((price - prev_price)::float / NULLIF(prev_price, 0)) * 100) >= 5
-		ORDER BY product_id, ABS(((price - prev_price)::float / NULLIF(prev_price, 0)) * 100) DESC
+                old_price,
+                new_price,
+                change_amount,
+                change_percent,
+                abs_change_percent,
+                change_date,
+                rn
+            FROM all_changes
+            ORDER BY product_id, abs_change_percent DESC
         )
     `
 
-	var query string
-	var args []interface{}
+	// Объединяем запрос
+	mainQuery := `
+        SELECT 
+            sc.product_id,
+            p.name as product_name,
+            p.vendor_code,
+            sc.old_price,
+            sc.new_price,
+            sc.change_amount,
+            sc.change_percent,
+            sc.change_date
+        FROM significant_changes sc
+        JOIN products p ON sc.product_id = p.id
+        WHERE sc.rn > $5
+        ORDER BY sc.abs_change_percent DESC, sc.change_date DESC
+        LIMIT $6
+    `
 
-	if cursor == "" {
-		// Запрос для первой страницы
-		query = baseQuery + `
-            SELECT 
-                sc.product_id,
-                p.name as product_name,
-                p.vendor_code,
-                sc.old_price,
-                sc.new_price,
-                sc.change_amount,
-                sc.change_percent,
-                sc.change_date
-            FROM significant_changes sc
-            JOIN products p ON sc.product_id = p.id
-            ORDER BY ABS(sc.change_percent) DESC, sc.change_date DESC
-            LIMIT $1
-        `
-		args = []interface{}{limit + 1}
-	} else {
-		// Запрос для следующих страниц
-		query = baseQuery + `
-            SELECT 
-                sc.product_id,
-                p.name as product_name,
-                p.vendor_code,
-                sc.old_price,
-                sc.new_price,
-                sc.change_amount,
-                sc.change_percent,
-                sc.change_date
-            FROM significant_changes sc
-            JOIN products p ON sc.product_id = p.id
-            WHERE 
-                ABS(sc.change_percent) < $1
-                OR (ABS(sc.change_percent) = $1 AND sc.change_date < $2)
-            ORDER BY ABS(sc.change_percent) DESC, sc.change_date DESC
-            LIMIT $3
-        `
-		args = []interface{}{math.Abs(lastChangePercent), lastDate, limit + 1}
+	// Собираем полный запрос
+	query := baseQueryStart + baseQueryEnd + mainQuery
+
+	// Подготавливаем аргументы запроса
+	args := []interface{}{sinceDate}
+
+	// Добавляем параметр минимального процентного изменения
+	args = append(args, minChangePercent)
+
+	// Добавляем параметр минимального абсолютного изменения
+	args = append(args, minChangeAmount)
+
+	// Добавляем параметр максимального процентного изменения (если указан)
+	if hasMaxPercent {
+		args = append(args, maxChangePercent)
 	}
 
+	// Добавляем параметры пагинации
+	args = append(args, cursorOffset, limit+1)
+
+	// Запускаем запрос с логированием времени
 	startTime := time.Now()
 	var changes []PriceChange
 	err := s.db.SelectContext(ctx, &changes, query, args...)
 	queryTime := time.Since(startTime)
 
 	if err != nil {
-		log.Printf("Ошибка запроса изменений цен с пагинацией (время: %v): %v", queryTime, err)
+		log.Printf("Ошибка запроса изменений цен (время: %v): %v", queryTime, err)
 		return nil, fmt.Errorf("ошибка получения изменений цен: %w", err)
 	}
 
-	log.Printf("Запрос изменений цен с пагинацией выполнен за %v (limit=%d)", queryTime, limit)
+	log.Printf("Запрос изменений цен выполнен за %v (limit=%d, найдено: %d)",
+		queryTime, limit, len(changes))
 
 	// Определяем, есть ли еще записи
 	hasMore := false
@@ -997,9 +1138,8 @@ func (s *Service) GetPriceChangesWithCursor(ctx context.Context, limit int, curs
 	// Формируем курсор для следующей страницы
 	var nextCursor string
 	if hasMore && len(changes) > 0 {
-		lastItem := changes[len(changes)-1]
-		cursorStr := fmt.Sprintf("%.2f|%s", math.Abs(lastItem.ChangePercent), lastItem.Date.Format(time.RFC3339))
-		nextCursor = base64.StdEncoding.EncodeToString([]byte(cursorStr))
+		nextOffset := cursorOffset + limit
+		nextCursor = base64.StdEncoding.EncodeToString([]byte(strconv.Itoa(nextOffset)))
 	}
 
 	// Создаем результат
@@ -1007,11 +1147,12 @@ func (s *Service) GetPriceChangesWithCursor(ctx context.Context, limit int, curs
 		Items:      changes,
 		NextCursor: nextCursor,
 		HasMore:    hasMore,
+		TotalCount: cursorOffset + len(changes),
 	}
 
 	// Кэшируем первую страницу с коротким TTL
 	if cursor == "" {
-		s.cache.SetWithTTL(fmt.Sprintf("paginated_price_changes_%d", limit), result, 3*time.Minute)
+		s.cache.SetWithTTL(cacheKey, result, 3*time.Minute)
 	}
 
 	return result, nil

@@ -28,6 +28,16 @@ func NewHandlers(db *sqlx.DB) *Handlers {
 	}
 }
 
+// PriceChangeFilter содержит параметры фильтрации для изменений цен
+type PriceChangeFilter struct {
+	MinChangePercent *float64   `json:"minChangePercent"` // Минимальное изменение в процентах
+	MaxChangePercent *float64   `json:"maxChangePercent"` // Максимальное изменение в процентах
+	MinChangeAmount  *int       `json:"minChangeAmount"`  // Минимальное абсолютное изменение
+	Since            *time.Time `json:"since"`            // Начальная дата периода
+	OnlyIncreases    *bool      `json:"onlyIncreases"`    // Только повышения цен
+	OnlyDecreases    *bool      `json:"onlyDecreases"`    // Только понижения цен
+}
+
 // RegisterRoutes регистрирует обработчики API в маршрутизаторе
 func (h *Handlers) RegisterRoutes(router *mux.Router) {
 	// Обработчики API
@@ -38,7 +48,7 @@ func (h *Handlers) RegisterRoutes(router *mux.Router) {
 
 	// Добавляем новый маршрут для пагинированных запросов
 	statsAPI.HandleFunc("/stock-changes", h.GetStockChangesWithPaginationPost).Methods("POST")
-	statsAPI.HandleFunc("/price-changes", h.GetPriceChangesWithPagination).Methods("POST")
+	statsAPI.HandleFunc("/price-changes", h.GetPriceChangesWithPaginationPost).Methods("POST")
 
 	statsAPI.HandleFunc("/price-history/{id}", h.GetPriceHistory).Methods("GET")
 	statsAPI.HandleFunc("/stock-history/{id}/{warehouseId}", h.GetStockHistory).Methods("GET")
@@ -235,7 +245,6 @@ func (h *Handlers) GetPriceHistory(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
 
-	// Получаем ID продукта из параметров запроса
 	vars := mux.Vars(r)
 	productIDStr := vars["id"]
 
@@ -245,9 +254,8 @@ func (h *Handlers) GetPriceHistory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Получаем количество дней из параметров запроса
 	daysStr := r.URL.Query().Get("days")
-	days := 30 // Значение по умолчанию
+	days := 30
 
 	if daysStr != "" {
 		parsedDays, err := strconv.Atoi(daysStr)
@@ -271,7 +279,6 @@ func (h *Handlers) GetStockHistory(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
 
-	// Получаем ID продукта и склада из параметров запроса
 	vars := mux.Vars(r)
 	productIDStr := vars["id"]
 	warehouseIDStr := vars["warehouseId"]
@@ -288,9 +295,8 @@ func (h *Handlers) GetStockHistory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Получаем количество дней из параметров запроса
 	daysStr := r.URL.Query().Get("days")
-	days := 30 // Значение по умолчанию
+	days := 30
 
 	if daysStr != "" {
 		parsedDays, err := strconv.Atoi(daysStr)
@@ -309,38 +315,81 @@ func (h *Handlers) GetStockHistory(w http.ResponseWriter, r *http.Request) {
 	sendJSONResponse(w, history)
 }
 
-// GetPriceChangesWithPagination возвращает недавние изменения цен с поддержкой пагинации
-func (h *Handlers) GetPriceChangesWithPagination(w http.ResponseWriter, r *http.Request) {
-	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second) // Увеличиваем таймаут до 10 секунд
+// GetPriceChangesWithPaginationPost обрабатывает POST-запросы для получения изменений цен
+// Принимает JSON с параметрами пагинации и фильтрации
+func (h *Handlers) GetPriceChangesWithPaginationPost(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
 
-	// Получаем параметры запроса
-	limitStr := r.URL.Query().Get("limit")
-	cursor := r.URL.Query().Get("cursor")
-	refresh := r.URL.Query().Get("refresh") == "true"
+	var request struct {
+		Limit   int               `json:"limit"`
+		Cursor  string            `json:"cursor"`
+		Refresh bool              `json:"refresh"`
+		Filter  PriceChangeFilter `json:"filter,omitempty"`
+	}
 
-	limit := 20 // Значение по умолчанию
-	if limitStr != "" {
-		parsedLimit, err := strconv.Atoi(limitStr)
-		if err == nil && parsedLimit > 0 {
-			limit = parsedLimit
+	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	if err != nil {
+		log.Printf("Ошибка чтения тела запроса для изменений цен: %v", err)
+		http.Error(w, "Ошибка чтения тела запроса", http.StatusBadRequest)
+		return
+	}
+	defer r.Body.Close()
+
+	if err := json.Unmarshal(body, &request); err != nil {
+		log.Printf("Ошибка декодирования JSON для изменений цен: %v", err)
+		http.Error(w, "Ошибка декодирования JSON", http.StatusBadRequest)
+		return
+	}
+
+	if request.Filter.Since == nil && r.URL.Query().Get("since") != "" {
+		sinceStr := r.URL.Query().Get("since")
+		since, err := time.Parse("2006-01-02", sinceStr)
+		if err == nil {
+			request.Filter.Since = &since
+		} else {
+			log.Printf("Ошибка парсинга даты since: %v", err)
 		}
 	}
 
-	// Ограничиваем максимальный размер страницы
-	if limit > 100 {
-		limit = 100
+	limit := 20
+	if request.Limit > 0 {
+		limit = request.Limit
+	}
+	if limit > 500 {
+		limit = 500
 	}
 
-	// Получаем данные с пагинацией
-	result, err := h.service.GetPriceChangesWithCursor(ctx, limit, cursor, refresh)
+	log.Printf("Запрос изменений цен: limit=%d, cursor=%s, refresh=%v, filter=%+v",
+		limit, request.Cursor, request.Refresh, request.Filter)
+
+	startTime := time.Now()
+
+	result, err := h.service.GetPriceChangesWithCursorAndFilter(
+		ctx,
+		limit,
+		request.Cursor,
+		request.Refresh,
+		request.Filter,
+	)
+
+	requestTime := time.Since(startTime)
+	log.Printf("API POST-запрос изменений цен выполнен за %v (limit=%d)", requestTime, limit)
+
 	if err != nil {
-		log.Printf("Ошибка при получении изменений цен с пагинацией: %v", err)
+		log.Printf("Ошибка при получении изменений цен: %v", err)
 		http.Error(w, "Ошибка при получении изменений цен", http.StatusInternalServerError)
 		return
 	}
 
-	sendJSONResponse(w, result)
+	// Формируем и отправляем ответ
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "private, max-age=60")
+
+	if err := json.NewEncoder(w).Encode(result); err != nil {
+		log.Printf("Ошибка кодирования ответа: %v", err)
+		http.Error(w, "Ошибка при формировании ответа", http.StatusInternalServerError)
+	}
 }
 
 func (h *Handlers) GetStockChangesWithPaginationPost(w http.ResponseWriter, r *http.Request) {
