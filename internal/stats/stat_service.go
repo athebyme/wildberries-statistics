@@ -858,7 +858,7 @@ func (s *Service) GetPriceChangesWithCursor(ctx context.Context, limit int, curs
 	return s.GetPriceChangesWithCursorAndFilter(ctx, limit, cursor, forceRefresh, emptyFilter)
 }
 
-// GetPriceChangesWithCursorAndFilter - полностью исправленная версия с корректной фильтрацией
+// GetPriceChangesWithCursorAndFilter - исправленная версия с корректным включением всех полей
 func (s *Service) GetPriceChangesWithCursorAndFilter(
 	ctx context.Context,
 	limit int,
@@ -867,7 +867,7 @@ func (s *Service) GetPriceChangesWithCursorAndFilter(
 	filter PriceChangeFilter,
 ) (*PaginatedPriceChanges, error) {
 	// Основные параметры
-	ctx, cancel := context.WithTimeout(ctx, 60*time.Second) // Увеличиваем таймаут для сложного запроса
+	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
 
 	if limit <= 0 {
@@ -945,7 +945,7 @@ func (s *Service) GetPriceChangesWithCursorAndFilter(
 	offsetParamIndex := len(args) - 1
 	limitParamIndex := len(args)
 
-	// Формируем основной SQL-запрос
+	// Формируем основной SQL-запрос с ИСПРАВЛЕННЫМ выбором полей
 	query := fmt.Sprintf(`
     WITH price_snapshot_pairs AS (
         -- Находим все пары "последний-предыдущий" снимок
@@ -960,6 +960,11 @@ func (s *Service) GetPriceChangesWithCursorAndFilter(
                     ((newest.final_price - previous.final_price)::float / previous.final_price) * 100
                 ELSE 0
             END AS percent_change,
+            ABS(CASE 
+                WHEN previous.final_price > 0 THEN 
+                    ((newest.final_price - previous.final_price)::float / previous.final_price) * 100
+                ELSE 0
+            END) AS abs_percent_change,
             newest.snapshot_time AS change_date
         FROM (
             -- Находим последний снимок для каждого товара/размера
@@ -998,14 +1003,13 @@ func (s *Service) GetPriceChangesWithCursorAndFilter(
     ),
     filtered_changes AS (
         -- Применяем все фильтры
-        SELECT 
-            ps1.*,
-            ABS(ps1.percent_change) AS abs_percent_change
+        SELECT *
         FROM price_snapshot_pairs ps1
         %s
     ),
     ranked_changes AS (
         -- Для каждого товара берем самое значительное изменение
+        -- ИСПРАВЛЕНО: включаем abs_percent_change в результат
         SELECT DISTINCT ON (product_id)
             product_id,
             size_id,
@@ -1013,6 +1017,7 @@ func (s *Service) GetPriceChangesWithCursorAndFilter(
             new_price,
             price_diff AS change_amount,
             percent_change AS change_percent,
+            abs_percent_change,
             change_date,
             ROW_NUMBER() OVER (ORDER BY abs_percent_change DESC, change_date DESC) AS rn
         FROM filtered_changes
@@ -1046,49 +1051,30 @@ func (s *Service) GetPriceChangesWithCursorAndFilter(
 
 	if err != nil {
 		log.Printf("Ошибка запроса изменений цен (время: %v): %v", queryTime, err)
+
+		// Упрощенный запрос для проверки работоспособности
+		simplifiedQuery := `
+            SELECT 
+                p.id as product_id,
+                p.name as product_name,
+                p.vendor_code,
+                0 as old_price,
+                0 as new_price,
+                0 as change_amount,
+                0.0 as change_percent,
+                NOW() as change_date
+            FROM products p
+            LIMIT 5
+        `
+		var simpleResults []PriceChange
+		simpleErr := s.db.SelectContext(ctx, &simpleResults, simplifiedQuery)
+		if simpleErr != nil {
+			log.Printf("Ошибка упрощенного запроса: %v", simpleErr)
+		} else {
+			log.Printf("Упрощенный запрос вернул %d строк", len(simpleResults))
+		}
+
 		return nil, fmt.Errorf("ошибка получения изменений цен: %w", err)
-	}
-
-	// Диагностика при пустом результате
-	if len(changes) == 0 && cursorOffset == 0 {
-		log.Printf("Запрос вернул пустой результат, проверяем базовые данные")
-
-		// Проверяем наличие записей в таблице
-		var snapshotCount int
-		s.db.GetContext(ctx, &snapshotCount, "SELECT COUNT(*) FROM price_snapshots LIMIT 1")
-		log.Printf("В таблице price_snapshots содержится %d записей", snapshotCount)
-
-		// Проверяем наличие последних снимков
-		var latestCount int
-		s.db.GetContext(ctx, &latestCount, `
-            SELECT COUNT(*) FROM (
-                SELECT DISTINCT product_id, size_id
-                FROM price_snapshots
-                WHERE snapshot_time >= $1
-            ) AS latest
-        `, sinceDate)
-		log.Printf("Найдено %d различных пар product_id/size_id с датой >= %s",
-			latestCount, sinceDate.Format("2006-01-02"))
-
-		// Проверяем наличие пар снимков
-		var pairsCount int
-		s.db.GetContext(ctx, &pairsCount, `
-            SELECT COUNT(*) FROM (
-                SELECT DISTINCT newest.product_id, newest.size_id
-                FROM (
-                    SELECT DISTINCT ON (product_id, size_id)
-                        product_id, size_id, snapshot_time
-                    FROM price_snapshots
-                    WHERE snapshot_time >= $1
-                    ORDER BY product_id, size_id, snapshot_time DESC
-                ) AS newest
-                JOIN price_snapshots AS previous 
-                ON newest.product_id = previous.product_id 
-                   AND newest.size_id = previous.size_id
-                   AND previous.snapshot_time < newest.snapshot_time
-            ) AS pairs
-        `, sinceDate)
-		log.Printf("Найдено %d пар снимков для сравнения", pairsCount)
 	}
 
 	log.Printf("Запрос изменений цен выполнен за %v, найдено записей: %d", queryTime, len(changes))
