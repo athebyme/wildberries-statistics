@@ -1034,9 +1034,7 @@ type PaginatedStockChanges struct {
 }
 
 // GetStockChangesWithCursor returns stock changes with pagination and filtering
-// Fixed version that better handles zero thresholds and has debugging information
-// GetStockChangesWithCursor returns stock changes with pagination and filtering
-// Fixed version that correctly applies filtering conditions
+// Fixed version without PostgreSQL syntax errors
 func (s *Service) GetStockChangesWithCursor(ctx context.Context, limit int, cursor string, filter StockChangeFilter, forceRefresh bool) (*PaginatedStockChanges, error) {
 	// Устанавливаем короткий таймаут для ускорения ответа
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
@@ -1084,7 +1082,7 @@ func (s *Service) GetStockChangesWithCursor(ctx context.Context, limit int, curs
 	log.Printf("Фильтрация с параметрами: warehouse=%v, minChangePercent=%.2f, minChangeAmt=%d, sinceDate=%v",
 		filter.WarehouseID, minChangePercent, minChangeAmt, sinceDate.Format("2006-01-02"))
 
-	// Оптимизированный запрос с ЯВНОЙ логикой фильтрации
+	// Исправленный запрос - используем DISTINCT ON вместо LIMIT BY
 	query := `
 		WITH latest_snapshots AS (
 			SELECT 
@@ -1107,7 +1105,7 @@ func (s *Service) GetStockChangesWithCursor(ctx context.Context, limit int, curs
 			WHERE rn = 1
 		),
 		previous_snapshots AS (
-			SELECT 
+			SELECT DISTINCT ON (ls.product_id, ls.warehouse_id)
 				ls.product_id, 
 				ls.warehouse_id, 
 				prev.amount as old_amount, 
@@ -1123,7 +1121,6 @@ func (s *Service) GetStockChangesWithCursor(ctx context.Context, limit int, curs
 				ls.product_id, 
 				ls.warehouse_id, 
 				prev.snapshot_time DESC
-			LIMIT 1 BY (ls.product_id, ls.warehouse_id)
 		),
 		filtered_changes AS (
 			SELECT 
@@ -1221,7 +1218,7 @@ func (s *Service) GetStockChangesWithCursor(ctx context.Context, limit int, curs
 	if len(changes) > 0 {
 		log.Printf("Топ изменения: 1) %s: %.2f%%, 2) %s: %.2f%% (сортировка по убыванию)",
 			changes[0].ProductName, changes[0].ChangePercent,
-			changes[len(changes)-1].ProductName, changes[len(changes)-1].ChangePercent)
+			changes[min(len(changes)-1, 1)].ProductName, changes[min(len(changes)-1, 1)].ChangePercent)
 	}
 
 	// Создаем результат
@@ -1233,4 +1230,12 @@ func (s *Service) GetStockChangesWithCursor(ctx context.Context, limit int, curs
 	}
 
 	return result, nil
+}
+
+// Вспомогательная функция для безопасного получения минимального значения
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
