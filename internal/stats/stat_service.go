@@ -1035,6 +1035,8 @@ type PaginatedStockChanges struct {
 
 // GetStockChangesWithCursor returns stock changes with pagination and filtering
 // Fixed version that better handles zero thresholds and has debugging information
+// GetStockChangesWithCursor returns stock changes with pagination and filtering
+// Fixed version that correctly applies filtering conditions
 func (s *Service) GetStockChangesWithCursor(ctx context.Context, limit int, cursor string, filter StockChangeFilter, forceRefresh bool) (*PaginatedStockChanges, error) {
 	// Устанавливаем короткий таймаут для ускорения ответа
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
@@ -1060,135 +1062,133 @@ func (s *Service) GetStockChangesWithCursor(ctx context.Context, limit int, curs
 		}
 	}
 
-	// Устанавливаем значения фильтров по умолчанию - более агрессивно ищем данные
-	sinceDate := time.Now().AddDate(-1, 0, 0) // По умолчанию смотрим за год назад вместо 14 дней
+	// Устанавливаем значения фильтров ТОЧНО как указаны в запросе
+	sinceDate := time.Now().AddDate(0, 0, -7) // По умолчанию смотрим за неделю
 	if filter.Since != nil {
 		sinceDate = *filter.Since
 	}
 
-	// Важно! Правильно обрабатываем нулевые значения фильтров
+	// Важно! Используем ИМЕННО те значения, которые переданы в запросе
+	// Если параметр не указан (nil), только тогда используем значение по умолчанию
 	var minChangePercent float64 = 0
 	if filter.MinChangePercent != nil {
 		minChangePercent = *filter.MinChangePercent
-	} else {
-		// Используем значение по умолчанию только если параметр не был указан явно
-		minChangePercent = 10.0
 	}
 
 	var minChangeAmt int = 0
 	if filter.MinChangeAmount != nil {
 		minChangeAmt = *filter.MinChangeAmount
-	} else {
-		// Используем значение по умолчанию только если параметр не был указан явно
-		minChangeAmt = 10
 	}
 
-	// Добавляем логирование параметров для отладки
-	log.Printf("Параметры запроса: sinceDate=%v, warehouseID=%v, minChangeAmt=%d, minChangePercent=%.2f",
-		sinceDate, filter.WarehouseID, minChangeAmt, minChangePercent)
+	// Логируем реально используемые значения
+	log.Printf("Фильтрация с параметрами: warehouse=%v, minChangePercent=%.2f, minChangeAmt=%d, sinceDate=%v",
+		filter.WarehouseID, minChangePercent, minChangeAmt, sinceDate.Format("2006-01-02"))
 
-	// Упрощенный запрос для диагностики - без лишней фильтрации
+	// Оптимизированный запрос с ЯВНОЙ логикой фильтрации
 	query := `
-		WITH product_latest_snapshots AS (
-			SELECT DISTINCT ON (product_id, warehouse_id) 
+		WITH latest_snapshots AS (
+			SELECT 
 				product_id, 
 				warehouse_id, 
-				amount,
-				snapshot_time
+				amount, 
+				snapshot_time,
+				ROW_NUMBER() OVER (PARTITION BY product_id, warehouse_id ORDER BY snapshot_time DESC) as rn
 			FROM stock_snapshots
 			WHERE snapshot_time >= $1
 			AND ($2::bigint IS NULL OR warehouse_id = $2)
-			ORDER BY product_id, warehouse_id, snapshot_time DESC
 		),
-		product_previous_snapshots AS (
-			SELECT DISTINCT ON (ss.product_id, ss.warehouse_id) 
-				ss.product_id, 
-				ss.warehouse_id, 
-				ss.amount,
-				ss.snapshot_time
-			FROM stock_snapshots ss
-			JOIN product_latest_snapshots ls 
-				ON ss.product_id = ls.product_id 
-				AND ss.warehouse_id = ls.warehouse_id
-			WHERE ss.snapshot_time < ls.snapshot_time
-			ORDER BY ss.product_id, ss.warehouse_id, ss.snapshot_time DESC
-		),
-		changes AS (
+		top_snapshots AS (
 			SELECT 
-				l.product_id,
-				l.warehouse_id,
-				p.amount as old_amount,
-				l.amount as new_amount,
-				l.amount - p.amount as change_amount,
-				CASE 
-					WHEN p.amount > 0 THEN ((l.amount - p.amount)::float / p.amount) * 100 
-					WHEN p.amount = 0 AND l.amount > 0 THEN 100
-					ELSE 0 
-				END as change_percent,
-				ABS(CASE 
-					WHEN p.amount > 0 THEN ((l.amount - p.amount)::float / p.amount) * 100 
-					WHEN p.amount = 0 AND l.amount > 0 THEN 100
-					ELSE 0 
-				END) as abs_change_percent,
-				l.snapshot_time as change_date,
-				ROW_NUMBER() OVER (ORDER BY ABS(CASE 
-					WHEN p.amount > 0 THEN ((l.amount - p.amount)::float / p.amount) * 100 
-					WHEN p.amount = 0 AND l.amount > 0 THEN 100
-					ELSE 0 
-				END) DESC, l.product_id, l.warehouse_id) as rn
-			FROM product_latest_snapshots l
-			JOIN product_previous_snapshots p 
-				ON l.product_id = p.product_id 
-				AND l.warehouse_id = p.warehouse_id
+				product_id, 
+				warehouse_id, 
+				amount as new_amount, 
+				snapshot_time as new_time
+			FROM latest_snapshots
+			WHERE rn = 1
+		),
+		previous_snapshots AS (
+			SELECT 
+				ls.product_id, 
+				ls.warehouse_id, 
+				prev.amount as old_amount, 
+				prev.snapshot_time as old_time
+			FROM latest_snapshots ls
+			JOIN stock_snapshots prev ON 
+				ls.product_id = prev.product_id AND 
+				ls.warehouse_id = prev.warehouse_id
 			WHERE 
-				ABS(l.amount - p.amount) >= $3
-				OR ABS(CASE 
-					WHEN p.amount > 0 THEN ((l.amount - p.amount)::float / p.amount) * 100 
-					WHEN p.amount = 0 AND l.amount > 0 THEN 100
+				ls.rn = 1 AND
+				prev.snapshot_time < ls.snapshot_time
+			ORDER BY 
+				ls.product_id, 
+				ls.warehouse_id, 
+				prev.snapshot_time DESC
+			LIMIT 1 BY (ls.product_id, ls.warehouse_id)
+		),
+		filtered_changes AS (
+			SELECT 
+				ts.product_id,
+				ts.warehouse_id,
+				ps.old_amount,
+				ts.new_amount,
+				ts.new_amount - ps.old_amount AS change_amount,
+				CASE 
+					WHEN ps.old_amount > 0 THEN ((ts.new_amount - ps.old_amount)::float / ps.old_amount) * 100 
+					WHEN ps.old_amount = 0 AND ts.new_amount > 0 THEN 100
 					ELSE 0 
-				END) >= $4
+				END AS change_percent,
+				ABS(CASE 
+					WHEN ps.old_amount > 0 THEN ((ts.new_amount - ps.old_amount)::float / ps.old_amount) * 100 
+					WHEN ps.old_amount = 0 AND ts.new_amount > 0 THEN 100
+					ELSE 0 
+				END) AS abs_change_percent,
+				ts.new_time AS change_date
+			FROM top_snapshots ts
+			JOIN previous_snapshots ps ON ts.product_id = ps.product_id AND ts.warehouse_id = ps.warehouse_id
+			WHERE 
+				-- Явно применяем фильтры минимальных изменений
+				(CASE WHEN $4 > 0 THEN 
+					ABS(CASE 
+						WHEN ps.old_amount > 0 THEN ((ts.new_amount - ps.old_amount)::float / ps.old_amount) * 100 
+						WHEN ps.old_amount = 0 AND ts.new_amount > 0 THEN 100
+						ELSE 0 
+					END) >= $4
+				ELSE TRUE END)
+				AND
+				(CASE WHEN $3 > 0 THEN
+					ABS(ts.new_amount - ps.old_amount) >= $3
+				ELSE TRUE END)
 		)
 		SELECT 
-			c.product_id,
+			fc.product_id,
 			p.name as product_name,
 			p.vendor_code,
-			c.warehouse_id,
+			fc.warehouse_id,
 			w.name as warehouse_name,
-			c.old_amount,
-			c.new_amount,
-			c.change_amount,
-			c.change_percent,
-			c.change_date
-		FROM changes c
-		JOIN products p ON c.product_id = p.id
-		JOIN warehouses w ON c.warehouse_id = w.id
-		WHERE c.rn > $5
-		ORDER BY c.abs_change_percent DESC, c.product_id, c.warehouse_id
-		LIMIT $6
+			fc.old_amount,
+			fc.new_amount,
+			fc.change_amount,
+			fc.change_percent,
+			fc.change_date
+		FROM filtered_changes fc
+		JOIN products p ON fc.product_id = p.id
+		JOIN warehouses w ON fc.warehouse_id = w.id
+		ORDER BY fc.abs_change_percent DESC, fc.change_date DESC, fc.product_id, fc.warehouse_id
+		LIMIT $6 OFFSET $5
 	`
-
-	// Для отладки - первые 10 записей из таблицы stock_snapshots
-	var debugCount int
-	debugQuery := `SELECT COUNT(*) FROM stock_snapshots WHERE ($1::bigint IS NULL OR warehouse_id = $1)`
-	err := s.db.GetContext(ctx, &debugCount, debugQuery, filter.WarehouseID)
-	if err != nil {
-		log.Printf("Ошибка подсчета записей в stock_snapshots: %v", err)
-	} else {
-		log.Printf("Найдено %d записей в stock_snapshots для warehouse_id=%v", debugCount, filter.WarehouseID)
-	}
 
 	startTime := time.Now()
 	var changes []StockChange
 
-	// Выполняем запрос
-	err = s.db.SelectContext(
+	// Выполняем запрос с явно указанными параметрами
+	err := s.db.SelectContext(
 		ctx,
 		&changes,
 		query,
 		sinceDate,
 		filter.WarehouseID,
-		minChangeAmt,
-		minChangePercent,
+		minChangeAmt,     // Явно используем переданное значение
+		minChangePercent, // Явно используем переданное значение
 		cursorOffset,
 		limit+1,
 	)
@@ -1199,8 +1199,9 @@ func (s *Service) GetStockChangesWithCursor(ctx context.Context, limit int, curs
 		return nil, fmt.Errorf("ошибка получения изменений остатков: %w", err)
 	}
 
-	log.Printf("Запрос изменений остатков выполнен за %v (offset: %d, limit: %d, найдено записей: %d)",
-		queryTime, cursorOffset, limit, len(changes))
+	// Логируем результаты запроса
+	log.Printf("Запрос изменений остатков выполнен за %v. Найдено записей: %d/%d при minChangePercent=%.2f",
+		queryTime, len(changes), limit, minChangePercent)
 
 	// Определяем, есть ли еще записи
 	hasMore := false
@@ -1209,11 +1210,18 @@ func (s *Service) GetStockChangesWithCursor(ctx context.Context, limit int, curs
 		changes = changes[:limit]
 	}
 
-	// Создаем курсор для следующей страницы (простой численный offset)
+	// Создаем курсор для следующей страницы
 	var nextCursor string
 	if hasMore {
 		nextOffset := cursorOffset + limit
 		nextCursor = base64.StdEncoding.EncodeToString([]byte(strconv.Itoa(nextOffset)))
+	}
+
+	// Проверка корректности сортировки - логируем первые несколько результатов
+	if len(changes) > 0 {
+		log.Printf("Топ изменения: 1) %s: %.2f%%, 2) %s: %.2f%% (сортировка по убыванию)",
+			changes[0].ProductName, changes[0].ChangePercent,
+			changes[len(changes)-1].ProductName, changes[len(changes)-1].ChangePercent)
 	}
 
 	// Создаем результат
@@ -1221,16 +1229,8 @@ func (s *Service) GetStockChangesWithCursor(ctx context.Context, limit int, curs
 		Items:      changes,
 		NextCursor: nextCursor,
 		HasMore:    hasMore,
-		TotalCount: len(changes),
+		TotalCount: cursorOffset + len(changes),
 	}
 
 	return result, nil
-}
-
-// Возвращает абсолютное значение float64
-func absFloat(x float64) float64 {
-	if x < 0 {
-		return -x
-	}
-	return x
 }
