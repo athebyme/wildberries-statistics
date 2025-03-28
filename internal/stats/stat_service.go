@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 	"wbmonitoring/monitoring/internal/db"
@@ -857,8 +858,7 @@ func (s *Service) GetPriceChangesWithCursor(ctx context.Context, limit int, curs
 	return s.GetPriceChangesWithCursorAndFilter(ctx, limit, cursor, forceRefresh, emptyFilter)
 }
 
-// GetPriceChangesWithCursorAndFilter возвращает изменения цен с пагинацией и фильтрацией
-// ПОЛНОСТЬЮ ИСПРАВЛЕННАЯ ВЕРСИЯ
+// GetPriceChangesWithCursorAndFilter - полностью исправленная версия с корректной фильтрацией
 func (s *Service) GetPriceChangesWithCursorAndFilter(
 	ctx context.Context,
 	limit int,
@@ -866,8 +866,8 @@ func (s *Service) GetPriceChangesWithCursorAndFilter(
 	forceRefresh bool,
 	filter PriceChangeFilter,
 ) (*PaginatedPriceChanges, error) {
-	// Короткий таймаут
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	// Основные параметры
+	ctx, cancel := context.WithTimeout(ctx, 60*time.Second) // Увеличиваем таймаут для сложного запроса
 	defer cancel()
 
 	if limit <= 0 {
@@ -890,112 +890,158 @@ func (s *Service) GetPriceChangesWithCursorAndFilter(
 		}
 	}
 
-	// Устанавливаем значения фильтров по умолчанию
-	sinceDate := time.Now().AddDate(0, -6, 0) // Увеличиваем до 6 месяцев для большего охвата
+	// Формируем список аргументов для SQL-запроса
+	args := make([]interface{}, 0)
+
+	// Фильтр по дате - параметр $1
+	sinceDate := time.Now().AddDate(-1, 0, 0) // Значение по умолчанию: 1 год назад
 	if filter.Since != nil {
 		sinceDate = *filter.Since
 	}
+	args = append(args, sinceDate)
 
-	// Минимальный процент изменения - НЕ фильтруем при minChangePercent=0
-	var minChangePercent float64 = 0
+	// Определяем все фильтры
+	var conditions []string
+	conditions = append(conditions, "ps1.new_price != ps1.old_price") // Только реальные изменения
+
+	// Фильтр по минимальному проценту изменения - параметр $2
+	minChangePercent := 0.0
 	if filter.MinChangePercent != nil {
 		minChangePercent = *filter.MinChangePercent
 	}
+	args = append(args, minChangePercent)
+	if minChangePercent > 0 {
+		conditions = append(conditions, "ABS(ps1.percent_change) >= $2")
+	}
 
-	// Логируем параметры запроса
-	log.Printf("Запрос изменений цен (исправленный): minPercent=%.1f, since=%s",
-		minChangePercent, sinceDate.Format("2006-01-02"))
+	// Фильтр по максимальному проценту изменения (если указан) - параметр $3
+	if filter.MaxChangePercent != nil {
+		args = append(args, *filter.MaxChangePercent)
+		conditions = append(conditions, "ABS(ps1.percent_change) <= $"+strconv.Itoa(len(args)))
+	}
 
-	// КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ - изменяем подход к запросу:
-	// 1. Используем более эффективный DISTINCT ON
-	// 2. Упрощаем структуру запроса
-	// 3. Убираем фильтрацию при minChangePercent=0
-	query := `
-        WITH latest_snapshots AS (
-            SELECT DISTINCT ON (product_id, size_id) 
-                product_id, 
-                size_id, 
-                final_price,
-                snapshot_time
+	// Фильтр по минимальному абсолютному изменению (если указан) - параметр $4
+	if filter.MinChangeAmount != nil && *filter.MinChangeAmount > 0 {
+		args = append(args, *filter.MinChangeAmount)
+		conditions = append(conditions, "ABS(ps1.new_price - ps1.old_price) >= $"+strconv.Itoa(len(args)))
+	}
+
+	// Фильтр по направлению изменения
+	if filter.OnlyIncreases != nil && *filter.OnlyIncreases {
+		conditions = append(conditions, "ps1.new_price > ps1.old_price")
+	}
+	if filter.OnlyDecreases != nil && *filter.OnlyDecreases {
+		conditions = append(conditions, "ps1.new_price < ps1.old_price")
+	}
+
+	// Соединяем все условия
+	whereClause := strings.Join(conditions, " AND ")
+	if whereClause != "" {
+		whereClause = "WHERE " + whereClause
+	}
+
+	// Добавляем параметры пагинации
+	args = append(args, cursorOffset, limit+1)
+	offsetParamIndex := len(args) - 1
+	limitParamIndex := len(args)
+
+	// Формируем основной SQL-запрос
+	query := fmt.Sprintf(`
+    WITH price_snapshot_pairs AS (
+        -- Находим все пары "последний-предыдущий" снимок
+        SELECT 
+            newest.product_id,
+            newest.size_id,
+            previous.final_price AS old_price,
+            newest.final_price AS new_price,
+            newest.final_price - previous.final_price AS price_diff,
+            CASE 
+                WHEN previous.final_price > 0 THEN 
+                    ((newest.final_price - previous.final_price)::float / previous.final_price) * 100
+                ELSE 0
+            END AS percent_change,
+            newest.snapshot_time AS change_date
+        FROM (
+            -- Находим последний снимок для каждого товара/размера
+            SELECT DISTINCT ON (product_id, size_id)
+                id, product_id, size_id, final_price, snapshot_time
             FROM price_snapshots
             WHERE snapshot_time >= $1
             ORDER BY product_id, size_id, snapshot_time DESC
-        ),
-        previous_snapshots AS (
-            -- Для каждого последнего снэпшота находим предыдущий
-            SELECT DISTINCT ON (l.product_id, l.size_id)
-                l.product_id,
-                l.size_id,
-                l.final_price AS new_price,
-                l.snapshot_time AS change_date,
-                ps.final_price AS old_price,
-                ps.snapshot_time AS previous_date
-            FROM latest_snapshots l
-            JOIN price_snapshots ps ON 
-                l.product_id = ps.product_id AND 
-                l.size_id = ps.size_id AND
-                ps.snapshot_time < l.snapshot_time
-            ORDER BY l.product_id, l.size_id, ps.snapshot_time DESC
-        ),
-        price_changes AS (
-            SELECT 
-                ps.product_id,
-                ps.size_id,
-                ps.old_price,
-                ps.new_price,
-                ps.new_price - ps.old_price AS change_amount,
-                CASE 
-                    WHEN ps.old_price > 0 THEN ((ps.new_price - ps.old_price)::float / ps.old_price) * 100 
-                    ELSE 0 
-                END AS change_percent,
-                ABS(CASE 
-                    WHEN ps.old_price > 0 THEN ((ps.new_price - ps.old_price)::float / ps.old_price) * 100 
-                    ELSE 0 
-                END) AS abs_change_percent,
-                ps.change_date
-            FROM previous_snapshots ps
-            WHERE 
-                ps.new_price != ps.old_price -- Только реальные изменения
-                AND ($2 = 0 OR  -- Если minChangePercent=0, пропускаем фильтрацию
-                    ABS(CASE 
-                        WHEN ps.old_price > 0 THEN ((ps.new_price - ps.old_price)::float / ps.old_price) * 100 
-                        ELSE 0 
-                    END) >= $2)
-        ),
-        ranked_changes AS (
-            -- Выбираем самое значительное изменение для каждого товара
-            SELECT DISTINCT ON (product_id)
-                product_id,
-                old_price,
-                new_price,
-                change_amount,
-                change_percent,
-                abs_change_percent,
-                change_date,
-                ROW_NUMBER() OVER (ORDER BY abs_change_percent DESC, change_date DESC) AS rn
-            FROM price_changes
-            ORDER BY product_id, abs_change_percent DESC
+        ) AS newest
+        JOIN (
+            -- Находим предыдущий снимок для каждого товара/размера
+            SELECT ps2.id, ps2.product_id, ps2.size_id, ps2.final_price, ps2.snapshot_time
+            FROM price_snapshots ps2
+            WHERE EXISTS (
+                SELECT 1 FROM (
+                    SELECT DISTINCT ON (product_id, size_id)
+                        product_id, size_id, snapshot_time
+                    FROM price_snapshots
+                    WHERE snapshot_time >= $1
+                    ORDER BY product_id, size_id, snapshot_time DESC
+                ) AS latest 
+                WHERE latest.product_id = ps2.product_id 
+                AND latest.size_id = ps2.size_id
+                AND latest.snapshot_time > ps2.snapshot_time
+            )
+        ) AS previous ON newest.product_id = previous.product_id 
+                      AND newest.size_id = previous.size_id
+        -- Для каждого товара/размера берем самый последний предыдущий снимок
+        WHERE NOT EXISTS (
+            SELECT 1 FROM price_snapshots ps3
+            WHERE ps3.product_id = newest.product_id
+            AND ps3.size_id = newest.size_id
+            AND ps3.snapshot_time > previous.snapshot_time
+            AND ps3.snapshot_time < newest.snapshot_time
         )
+    ),
+    filtered_changes AS (
+        -- Применяем все фильтры
         SELECT 
-            rc.product_id,
-            p.name AS product_name,
-            p.vendor_code,
-            rc.old_price,
-            rc.new_price,
-            rc.change_amount,
-            rc.change_percent,
-            rc.change_date
-        FROM ranked_changes rc
-        JOIN products p ON rc.product_id = p.id
-        WHERE rc.rn > $3
-        ORDER BY rc.abs_change_percent DESC, rc.change_date DESC
-        LIMIT $4
-    `
+            ps1.*,
+            ABS(ps1.percent_change) AS abs_percent_change
+        FROM price_snapshot_pairs ps1
+        %s
+    ),
+    ranked_changes AS (
+        -- Для каждого товара берем самое значительное изменение
+        SELECT DISTINCT ON (product_id)
+            product_id,
+            size_id,
+            old_price,
+            new_price,
+            price_diff AS change_amount,
+            percent_change AS change_percent,
+            change_date,
+            ROW_NUMBER() OVER (ORDER BY abs_percent_change DESC, change_date DESC) AS rn
+        FROM filtered_changes
+        ORDER BY product_id, abs_percent_change DESC
+    )
+    SELECT 
+        rc.product_id,
+        p.name AS product_name,
+        p.vendor_code,
+        rc.old_price,
+        rc.new_price,
+        rc.change_amount,
+        rc.change_percent,
+        rc.change_date
+    FROM ranked_changes rc
+    JOIN products p ON rc.product_id = p.id
+    WHERE rc.rn > $%d
+    ORDER BY rc.abs_percent_change DESC, rc.change_date DESC
+    LIMIT $%d
+    `, whereClause, offsetParamIndex, limitParamIndex)
 
-	// Запускаем запрос с логированием времени
+	// Выводим информацию о параметрах и фильтрах
+	log.Printf("Запрос изменений цен (параметры): minPercent=%.1f, offset=%d, limit=%d, условия: %s",
+		minChangePercent, cursorOffset, limit, whereClause)
+
+	// Выполняем запрос
 	startTime := time.Now()
 	var changes []PriceChange
-	err := s.db.SelectContext(ctx, &changes, query, sinceDate, minChangePercent, cursorOffset, limit+1)
+	err := s.db.SelectContext(ctx, &changes, query, args...)
 	queryTime := time.Since(startTime)
 
 	if err != nil {
@@ -1003,7 +1049,49 @@ func (s *Service) GetPriceChangesWithCursorAndFilter(
 		return nil, fmt.Errorf("ошибка получения изменений цен: %w", err)
 	}
 
-	log.Printf("Запрос изменений цен выполнен за %v (найдено: %d)", queryTime, len(changes))
+	// Диагностика при пустом результате
+	if len(changes) == 0 && cursorOffset == 0 {
+		log.Printf("Запрос вернул пустой результат, проверяем базовые данные")
+
+		// Проверяем наличие записей в таблице
+		var snapshotCount int
+		s.db.GetContext(ctx, &snapshotCount, "SELECT COUNT(*) FROM price_snapshots LIMIT 1")
+		log.Printf("В таблице price_snapshots содержится %d записей", snapshotCount)
+
+		// Проверяем наличие последних снимков
+		var latestCount int
+		s.db.GetContext(ctx, &latestCount, `
+            SELECT COUNT(*) FROM (
+                SELECT DISTINCT product_id, size_id
+                FROM price_snapshots
+                WHERE snapshot_time >= $1
+            ) AS latest
+        `, sinceDate)
+		log.Printf("Найдено %d различных пар product_id/size_id с датой >= %s",
+			latestCount, sinceDate.Format("2006-01-02"))
+
+		// Проверяем наличие пар снимков
+		var pairsCount int
+		s.db.GetContext(ctx, &pairsCount, `
+            SELECT COUNT(*) FROM (
+                SELECT DISTINCT newest.product_id, newest.size_id
+                FROM (
+                    SELECT DISTINCT ON (product_id, size_id)
+                        product_id, size_id, snapshot_time
+                    FROM price_snapshots
+                    WHERE snapshot_time >= $1
+                    ORDER BY product_id, size_id, snapshot_time DESC
+                ) AS newest
+                JOIN price_snapshots AS previous 
+                ON newest.product_id = previous.product_id 
+                   AND newest.size_id = previous.size_id
+                   AND previous.snapshot_time < newest.snapshot_time
+            ) AS pairs
+        `, sinceDate)
+		log.Printf("Найдено %d пар снимков для сравнения", pairsCount)
+	}
+
+	log.Printf("Запрос изменений цен выполнен за %v, найдено записей: %d", queryTime, len(changes))
 
 	// Определяем, есть ли еще записи
 	hasMore := false
@@ -1014,7 +1102,7 @@ func (s *Service) GetPriceChangesWithCursorAndFilter(
 
 	// Формируем курсор для следующей страницы
 	var nextCursor string
-	if hasMore && len(changes) > 0 {
+	if hasMore {
 		nextOffset := cursorOffset + limit
 		nextCursor = base64.StdEncoding.EncodeToString([]byte(strconv.Itoa(nextOffset)))
 	}
