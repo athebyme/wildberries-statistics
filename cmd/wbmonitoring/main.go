@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"github.com/gorilla/mux"
 	"log"
 	"net/http"
 	"os"
@@ -12,15 +13,12 @@ import (
 	"wbmonitoring/monitoring/internal/config"
 	"wbmonitoring/monitoring/internal/monitoring"
 	"wbmonitoring/monitoring/internal/stats"
-
-	"github.com/gorilla/mux"
+	"wbmonitoring/monitoring/internal/stats/sse"
 )
 
 func main() {
-	// Получаем настройки из переменных окружения
 	cfg := config.LoadConfig()
 
-	// Проверяем обязательные параметры
 	if cfg.ApiKey == "" {
 		log.Fatal("WB_API_KEY environment variable is required")
 	}
@@ -33,19 +31,16 @@ func main() {
 		log.Fatal("TELEGRAM_CHAT_ID environment variable is required")
 	}
 
-	// Получаем порт из переменных окружения или используем порт по умолчанию
 	port := os.Getenv("SERVER_PORT")
 	if port == "" {
-		port = "8080" // Порт по умолчанию
+		port = "8080"
 	}
 
-	// Получаем базовый путь для API из переменных окружения
 	basePath := os.Getenv("API_BASE_PATH")
 	if basePath == "" {
 		basePath = "" // Пустой префикс по умолчанию
 	}
 
-	// Получаем идентификатор этого экземпляра
 	instanceID := os.Getenv("INSTANCE_ID")
 	if instanceID == "" {
 		instanceID = "default"
@@ -81,7 +76,6 @@ func main() {
 
 	log.Printf("Starting Wildberries Monitoring Service (Instance: %s)", instanceID)
 
-	// Запускаем мониторинг в фоновом режиме
 	go func() {
 		if err := service.RunProductUpdater(ctx); err != nil && !errors.Is(err, context.Canceled) {
 			log.Fatalf("Product updater stopped with error: %v", err)
@@ -103,6 +97,8 @@ func main() {
 	} else {
 		apiRouter = router
 	}
+
+	SetupSSE(router, service)
 
 	statsHandlers := stats.NewHandlers(service.GetDB())
 
@@ -146,4 +142,19 @@ func main() {
 
 	cancel()
 	log.Printf("Сервер успешно остановлен (Instance: %s)", instanceID)
+}
+
+// SetupSSE initializes and connects SSE functionality
+func SetupSSE(router *mux.Router, monitoringService *monitoring.Service) {
+	sse.InitializeSSE()
+
+	sse.RegisterSSERoutes(router)
+
+	if monitoringService != nil {
+		sseManager := sse.GetSSEManager()
+		monitoringService.AddSSENotification(sseManager)
+		log.Println("Monitoring service connected to SSE")
+	} else {
+		log.Println("Warning: Monitoring service not available for SSE integration")
+	}
 }

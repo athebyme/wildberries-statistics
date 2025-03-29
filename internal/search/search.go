@@ -27,7 +27,7 @@ type SearchEngineConfig struct {
 	MaxRetries     int
 	RetryInterval  time.Duration
 	RequestTimeout time.Duration
-	ApiKey         string // Добавляем API ключ в конфиг
+	ApiKey         string
 }
 
 // SearchEngine struct
@@ -38,7 +38,6 @@ type SearchEngine struct {
 	limiter *rate.Limiter
 }
 
-// NewSearchEngine creates a new SearchEngine instance.
 func NewSearchEngine(db *sql.DB, writer io.Writer, config SearchEngineConfig) *SearchEngine {
 	return &SearchEngine{
 		db:      db,
@@ -50,7 +49,6 @@ func NewSearchEngine(db *sql.DB, writer io.Writer, config SearchEngineConfig) *S
 
 const postNomenclature = "https://content-api.wildberries.ru/content/v2/get/cards/list"
 
-// GetNomenclatures retrieves nomenclatures from Wildberries API.
 func (d *SearchEngine) GetNomenclatures(settings models.Settings, locale string) (*models.NomenclatureResponse, error) {
 	url := postNomenclature
 	if locale != "" {
@@ -69,7 +67,7 @@ func (d *SearchEngine) GetNomenclatures(settings models.Settings, locale string)
 		return nil, fmt.Errorf("creating request: %w", err)
 	}
 
-	req.Header.Set("Authorization", "Bearer "+d.config.ApiKey) // Используем API ключ из конфига
+	req.Header.Set("Authorization", "Bearer "+d.config.ApiKey)
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := client.Do(req)
@@ -90,8 +88,7 @@ func (d *SearchEngine) GetNomenclatures(settings models.Settings, locale string)
 	return &nomenclatureResponse, nil
 }
 
-// GetNomenclaturesWithLimitConcurrentlyPutIntoChannel retrieves nomenclatures concurrently and puts them into a channel.
-func (d *SearchEngine) GetNomenclaturesWithLimitConcurrentlyPutIntoChannel(
+func (d *SearchEngine) FetchNomenclaturesChan(
 	ctx context.Context,
 	settings models.Settings,
 	locale string,
@@ -116,7 +113,7 @@ func (d *SearchEngine) GetNomenclaturesWithLimitConcurrentlyPutIntoChannel(
 
 	for i := 0; i < d.config.WorkerCount; i++ {
 		wg.Add(1)
-		go d.safeWorker(
+		go d.worker(
 			ctx,
 			i,
 			&wg,
@@ -175,7 +172,7 @@ func (d *SearchEngine) GetNomenclaturesWithLimitConcurrentlyPutIntoChannel(
 	return nil
 }
 
-func (d *SearchEngine) safeWorker(
+func (d *SearchEngine) worker(
 	ctx context.Context,
 	workerID int,
 	wg *sync.WaitGroup,

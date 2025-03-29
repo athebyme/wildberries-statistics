@@ -19,9 +19,72 @@ import (
 	"wbmonitoring/monitoring/internal/db"
 	"wbmonitoring/monitoring/internal/models"
 	"wbmonitoring/monitoring/internal/search"
+	"wbmonitoring/monitoring/internal/stats/sse"
 	"wbmonitoring/monitoring/internal/telegram"
 	"wbmonitoring/monitoring/internal/telegram/report"
 )
+
+// SSENotifier handles sending notifications to SSE clients
+type SSENotifier struct {
+	sseManager *sse.SSEManager
+	enabled    bool
+}
+
+// NewSSENotifier creates a new SSE notifier
+func NewSSENotifier(sseManager *sse.SSEManager) *SSENotifier {
+	return &SSENotifier{
+		sseManager: sseManager,
+		enabled:    sseManager != nil,
+	}
+}
+
+// NotifyPriceChange sends a price change notification to SSE clients
+func (n *SSENotifier) NotifyPriceChange(productID int, productName, vendorCode string, oldPrice, newPrice, changeAmount int, changePercent float64) {
+	if !n.enabled {
+		return
+	}
+
+	// Create a price change event
+	priceChange := map[string]interface{}{
+		"productId":     productID,
+		"productName":   productName,
+		"vendorCode":    vendorCode,
+		"oldPrice":      oldPrice,
+		"newPrice":      newPrice,
+		"changeAmount":  changeAmount,
+		"changePercent": changePercent,
+		"date":          time.Now().Format(time.RFC3339),
+	}
+
+	// Broadcast to all SSE clients
+	n.sseManager.BroadcastPriceChange(priceChange)
+	log.Printf("SSE: Broadcasted price change for product %s (%d)", productName, productID)
+}
+
+// NotifyStockChange sends a stock change notification to SSE clients
+func (n *SSENotifier) NotifyStockChange(productID int, productName, vendorCode string, warehouseID int64, warehouseName string, oldAmount, newAmount, changeAmount int, changePercent float64) {
+	if !n.enabled {
+		return
+	}
+
+	// Create a stock change event
+	stockChange := map[string]interface{}{
+		"productId":     productID,
+		"productName":   productName,
+		"vendorCode":    vendorCode,
+		"warehouseId":   warehouseID,
+		"warehouseName": warehouseName,
+		"oldAmount":     oldAmount,
+		"newAmount":     newAmount,
+		"changeAmount":  changeAmount,
+		"changePercent": changePercent,
+		"date":          time.Now().Format(time.RFC3339),
+	}
+
+	// Broadcast to all SSE clients
+	n.sseManager.BroadcastStockChange(stockChange)
+	log.Printf("SSE: Broadcasted stock change for product %s (%d) at warehouse %s", productName, productID, warehouseName)
+}
 
 type Service struct {
 	db               *sqlx.DB
@@ -33,6 +96,7 @@ type Service struct {
 	httpClient       *http.Client
 	telegramBot      *telegram.Bot
 	recordCleanupSvc *RecordCleanupService
+	sseNotifier      *SSENotifier
 
 	ctx context.Context
 }
@@ -86,7 +150,6 @@ func NewMonitoringService(cfg config.Config) (*Service, error) {
 		}
 	}
 
-	// Конфигурация для поискового движка
 	searchConfig := search.SearchEngineConfig{
 		WorkerCount:    cfg.WorkerCount,
 		MaxRetries:     cfg.MaxRetries,
@@ -95,13 +158,10 @@ func NewMonitoringService(cfg config.Config) (*Service, error) {
 		ApiKey:         cfg.ApiKey,
 	}
 
-	// Инициализируем поисковый движок
 	searchEngine := search.NewSearchEngine(database.DB, os.Stdout, searchConfig)
 
-	// Инициализируем HTTP клиент
 	client := http.Client{Timeout: cfg.RequestTimeout}
 
-	// Создаем и возвращаем сервис мониторинга
 	return &Service{
 		db:               database,
 		config:           cfg,
@@ -113,6 +173,12 @@ func NewMonitoringService(cfg config.Config) (*Service, error) {
 		httpClient:       &client,
 		ctx:              context.Background(), // Инициализируем контекст по умолчанию
 	}, nil
+}
+
+// AddSSENotification adds SSE notification to the monitoring service
+func (m *Service) AddSSENotification(sseManager *sse.SSEManager) {
+	m.sseNotifier = NewSSENotifier(sseManager)
+	log.Println("SSE notification added to monitoring service")
 }
 
 func (m *Service) RunProductUpdater(ctx context.Context) error {
@@ -143,9 +209,9 @@ func (m *Service) UpdateProducts(ctx context.Context) error {
 	locale := ""
 
 	go func() {
-		err := m.searchEngine.GetNomenclaturesWithLimitConcurrentlyPutIntoChannel(ctx, settings, locale, nomenclatureChan)
+		err := m.searchEngine.FetchNomenclaturesChan(ctx, settings, locale, nomenclatureChan)
 		if err != nil {
-			log.Printf("GetNomenclaturesWithLimitConcurrentlyPutIntoChannel failed: %v", err)
+			log.Printf("FetchNomenclaturesChan failed: %v", err)
 			close(nomenclatureChan)
 		}
 	}()
@@ -259,6 +325,139 @@ func (m *Service) UpdateWarehouses(ctx context.Context) error {
 	}
 
 	log.Println("Successfully updated warehouses in the database.")
+	return nil
+}
+
+func (m *Service) ModifiedCheckPriceChanges(ctx context.Context, product *models.ProductRecord, newPrice *models.PriceRecord) error {
+	lastPrice, err := m.GetLastPrice(ctx, product.ID)
+	if err != nil {
+		return fmt.Errorf("getting last price: %w", err)
+	}
+
+	// If no previous price - just save the current one
+	if lastPrice == nil {
+		err := m.SavePrice(ctx, newPrice)
+		if err != nil {
+			return fmt.Errorf("saving initial price: %w", err)
+		}
+		return nil
+	}
+
+	// Calculate change percentage
+	priceDiff := float64(0)
+	if lastPrice.Price > 0 {
+		priceDiff = (float64(newPrice.Price-lastPrice.Price) / float64(lastPrice.Price)) * 100
+	}
+
+	// Save the new price
+	err = m.SavePrice(ctx, newPrice)
+	if err != nil {
+		return fmt.Errorf("saving price: %w", err)
+	}
+
+	// If the change is significant - send notification
+	if priceDiff <= -m.config.PriceThreshold || priceDiff >= m.config.PriceThreshold {
+		// Send Telegram notification (existing code)
+		message := fmt.Sprintf(
+			"🚨 Обнаружено значительное изменение цены!\n"+
+				"Товар: %s (арт. `%s`)\n"+
+				"Старая цена: %d руб (скидка %d%%)\n"+
+				"Новая цена: %d руб (скидка %d%%)\n"+
+				"Изменение: %.2f%%",
+			product.Name, product.VendorCode,
+			lastPrice.Price, int((1.0-float64(lastPrice.FinalPrice)/float64(lastPrice.Price))*100),
+			newPrice.Price, int((1.0-float64(newPrice.FinalPrice)/float64(newPrice.Price))*100),
+			priceDiff,
+		)
+
+		if err := m.telegramBot.SendTelegramAlertWithParseMode(message, "Markdown"); err != nil {
+			log.Printf("Failed to send Telegram alert about price change: %v", err)
+		}
+
+		if m.sseNotifier != nil {
+			m.sseNotifier.NotifyPriceChange(
+				product.ID,
+				product.Name,
+				product.VendorCode,
+				lastPrice.Price,
+				newPrice.Price,
+				newPrice.Price-lastPrice.Price,
+				priceDiff,
+			)
+		}
+	}
+
+	return nil
+}
+
+func (m *Service) ModifiedCheckStockChanges(ctx context.Context, product *models.ProductRecord, newStock *models.StockRecord) error {
+	lastStock, err := db.GetLastStock(ctx, m.db, product.ID, newStock.WarehouseID)
+	if err != nil {
+		return fmt.Errorf("getting last stock: %w", err)
+	}
+
+	// If no previous stock - just save the current one
+	if lastStock == nil {
+		err := db.SaveStock(ctx, m.db, newStock)
+		if err != nil {
+			return fmt.Errorf("saving initial stock: %w", err)
+		}
+		return nil
+	}
+
+	// Calculate change percentage
+	stockDiff := float64(0)
+	if lastStock.Amount > 0 {
+		stockDiff = math.Abs(float64(newStock.Amount-lastStock.Amount)) / float64(lastStock.Amount) * 100
+	} else if newStock.Amount > 0 {
+		stockDiff = 100 // Product appeared in stock
+	}
+
+	err = db.SaveStock(ctx, m.db, newStock)
+	if err != nil {
+		return fmt.Errorf("saving stock: %w", err)
+	}
+
+	if stockDiff <= -m.config.StockThreshold || stockDiff >= m.config.StockThreshold {
+		var warehouseName string
+		err := m.db.GetContext(ctx, &warehouseName, "SELECT name FROM warehouses WHERE id = $1", newStock.WarehouseID)
+		if err != nil {
+			warehouseName = fmt.Sprintf("Склад %d", newStock.WarehouseID)
+		}
+
+		message := fmt.Sprintf(
+			"📦 Обнаружено значительное изменение остатков!\n"+
+				"Товар: %s (арт. `%s`)\n"+
+				"Склад: %s\n"+
+				"Старое количество: %d шт.\n"+
+				"Новое количество: %d шт.\n"+
+				"Изменение: %.2f%%",
+			product.Name, product.VendorCode,
+			warehouseName,
+			lastStock.Amount,
+			newStock.Amount,
+			stockDiff,
+		)
+
+		if err := m.telegramBot.SendTelegramAlertWithParseMode(message, "Markdown"); err != nil {
+			log.Printf("Failed to send Telegram alert about stock change: %v", err)
+		}
+
+		if m.sseNotifier != nil {
+			m.sseNotifier.NotifyStockChange(
+				product.ID,
+				product.Name,
+				product.VendorCode,
+				newStock.WarehouseID,
+				warehouseName,
+				lastStock.Amount,
+				newStock.Amount,
+				newStock.Amount-lastStock.Amount,
+				stockDiff,
+			)
+		}
+	}
+
 	return nil
 }
 
