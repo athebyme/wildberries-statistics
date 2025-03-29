@@ -33,7 +33,7 @@ func InitializeImprovedServices(
 	cleanupService := NewRecordCleanupService(
 		db,
 		24*time.Hour,
-		30*24*time.Hour,
+		10*24*time.Hour,
 		hourlyKeeper,
 		defaultCleanupWorkers,
 	)
@@ -58,7 +58,6 @@ func InitializeImprovedServices(
 }
 
 func UpdateMonitoringServiceWithImprovedComponents(service *Service) error {
-
 	hourlyKeeper, cleanupService, emailService, pdfGenerator, excelGenerator, err :=
 		InitializeImprovedServices(service.config, service.db, service.telegramBot)
 
@@ -70,6 +69,9 @@ func UpdateMonitoringServiceWithImprovedComponents(service *Service) error {
 		return fmt.Errorf("failed to update telegram bot services: %w", err)
 	}
 
+	// Сохраняем ссылку на сервис очистки
+	service.recordCleanupSvc = cleanupService
+
 	go func() {
 		log.Println("Starting improved hourly data keeper")
 		if err := hourlyKeeper.RunHourlySnapshots(service.ctx); err != nil {
@@ -80,6 +82,14 @@ func UpdateMonitoringServiceWithImprovedComponents(service *Service) error {
 	go func() {
 		log.Println("Starting improved record cleanup service")
 		cleanupService.RunCleanupProcess(service.ctx)
+	}()
+
+	// Запускаем немедленную очистку после перезапуска
+	go func() {
+		log.Println("Запуск немедленной очистки после перезапуска")
+		if err := cleanupService.CleanupRecords(service.ctx); err != nil {
+			log.Printf("Ошибка при запуске немедленной очистки: %v", err)
+		}
 	}()
 
 	log.Println("Successfully updated monitoring service with improved components")

@@ -2,9 +2,12 @@ package monitoring
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"github.com/lib/pq"
 	"log"
+	"sort"
+	"strings"
 	"time"
 	"wbmonitoring/monitoring/internal/models"
 
@@ -45,6 +48,8 @@ func (s *RecordCleanupService) RunCleanupProcess(ctx context.Context) {
 
 	log.Println("Record cleanup process started")
 
+	log.Printf("Retention interval set to %v", s.retentionInterval)
+
 	if err := s.CleanupRecords(ctx); err != nil {
 		log.Printf("Error during initial records cleanup: %v", err)
 	}
@@ -65,7 +70,7 @@ func (s *RecordCleanupService) RunCleanupProcess(ctx context.Context) {
 func (s *RecordCleanupService) CleanupRecords(ctx context.Context) error {
 	log.Println("Starting records cleanup process")
 
-	// Добавляем таймаут для избежания зависаний
+	//  таймаут для избежания зависаний
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Hour)
 	defer cancel()
 
@@ -74,7 +79,7 @@ func (s *RecordCleanupService) CleanupRecords(ctx context.Context) error {
 	startOfYesterday := time.Date(yesterday.Year(), yesterday.Month(), yesterday.Day(), 0, 0, 0, 0, now.Location())
 	endOfYesterday := time.Date(yesterday.Year(), yesterday.Month(), yesterday.Day(), 23, 59, 59, 999999999, now.Location())
 
-	// Получаем список продуктов
+	//  список продуктов
 	products, err := s.getAllProducts(ctx)
 	if err != nil {
 		return fmt.Errorf("getting products for cleanup: %w", err)
@@ -83,7 +88,7 @@ func (s *RecordCleanupService) CleanupRecords(ctx context.Context) error {
 	log.Printf("Found %d products to process for cleanup", len(products))
 
 	// Ограничиваем размер пакета для обработки
-	batchSize := 50
+	batchSize := 200
 
 	// Группируем товары для пакетной обработки
 	var batches [][]models.ProductRecord
@@ -111,7 +116,7 @@ func (s *RecordCleanupService) CleanupRecords(ctx context.Context) error {
 		log.Printf("Processing batch %d of %d (%d products)", i+1, len(batches), len(batch))
 
 		// Обработка пакета с таймаутом
-		batchCtx, batchCancel := context.WithTimeout(ctx, 10*time.Minute)
+		batchCtx, batchCancel := context.WithTimeout(ctx, 100*time.Minute)
 
 		// Пакетная обработка снапшотов цен
 		priceErr := s.processBatchPrices(batchCtx, batch, startOfYesterday, endOfYesterday)
@@ -137,7 +142,24 @@ func (s *RecordCleanupService) CleanupRecords(ctx context.Context) error {
 	}
 
 	// Вызываем очистку старых данных
-	retentionDate := now.Add(-s.retentionInterval)
+	yesterday = now.AddDate(0, 0, -1)
+	retentionDate := time.Date(yesterday.Year(), yesterday.Month(), yesterday.Day(),
+		0, 0, 0, 0, now.Location())
+
+	log.Printf("Will delete records older than %s", retentionDate.Format("2006-01-02 15:04:05"))
+
+	var priceCount int
+	countQuery := "SELECT COUNT(*) FROM prices WHERE recorded_at < $1"
+	if err := s.db.GetContext(ctx, &priceCount, countQuery, retentionDate); err == nil {
+		log.Printf("Found %d price records to delete", priceCount)
+	}
+
+	var stockCount int
+	countQuery = "SELECT COUNT(*) FROM stocks WHERE recorded_at < $1"
+	if err := s.db.GetContext(ctx, &stockCount, countQuery, retentionDate); err == nil {
+		log.Printf("Found %d stock records to delete", stockCount)
+	}
+
 	if err := s.deleteOldRecords(ctx, retentionDate); err != nil {
 		return fmt.Errorf("deleting old records: %w", err)
 	}
@@ -331,10 +353,13 @@ func (s *RecordCleanupService) ensureHourlyStockSnapshotsBatch(
 
 				if latestStock != nil {
 					snapshotsToInsert = append(snapshotsToInsert, models.StockSnapshot{
-						ProductID:    productID,
-						WarehouseID:  warehouseID,
-						Amount:       latestStock.Amount,
-						SnapshotTime: hourStart,
+						ProductID:   productID,
+						WarehouseID: warehouseID,
+						Amount:      latestStock.Amount,
+
+						SnapshotTime: time.Date(latestStock.RecordedAt.Year(), latestStock.RecordedAt.Month(),
+							latestStock.RecordedAt.Day(), latestStock.RecordedAt.Hour(), 0, 0, 0,
+							latestStock.RecordedAt.Location()),
 					})
 				}
 
@@ -727,7 +752,10 @@ func (s *RecordCleanupService) ensureHourlyPriceSnapshotsBatch(
 						CurrencyIsoCode:   latestPrice.CurrencyIsoCode,
 						TechSizeName:      latestPrice.TechSizeName,
 						EditableSizePrice: latestPrice.EditableSizePrice,
-						SnapshotTime:      hourStart,
+
+						SnapshotTime: time.Date(latestPrice.RecordedAt.Year(), latestPrice.RecordedAt.Month(),
+							latestPrice.RecordedAt.Day(), latestPrice.RecordedAt.Hour(), 0, 0, 0,
+							latestPrice.RecordedAt.Location()),
 					})
 				}
 
@@ -746,59 +774,122 @@ func (s *RecordCleanupService) ensureHourlyPriceSnapshotsBatch(
 
 // Пакетная вставка снапшотов цен
 func (s *RecordCleanupService) batchInsertPriceSnapshots(ctx context.Context, snapshots []models.PriceSnapshot) error {
-	// Используем транзакцию для пакетной вставки
-	tx, err := s.db.BeginTxx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("starting transaction: %w", err)
+	if len(snapshots) == 0 {
+		return nil
 	}
-	defer tx.Rollback()
 
-	// Подготавливаем запрос для пакетной вставки
-	stmt, err := tx.PrepareContext(ctx, `
-        INSERT INTO price_snapshots (
-            product_id, size_id, price, discount, club_discount, 
-            final_price, club_final_price, currency_iso_code, 
-            tech_size_name, editable_size_price, snapshot_time
-        ) VALUES (
-            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11
-        )
-        ON CONFLICT (product_id, size_id, snapshot_time) DO NOTHING
-    `)
-	if err != nil {
-		return fmt.Errorf("preparing statement: %w", err)
-	}
-	defer stmt.Close()
+	const maxRetries = 5
+	const smallBatchSize = 200 // Значительно меньший размер пакета
 
-	// Вставляем снапшоты пакетами по 1000 штук
-	batchSize := 1000
+	// 1. Сортируем снапшоты по идентификаторам для обеспечения постоянного порядка доступа
+	sort.Slice(snapshots, func(i, j int) bool {
+		if snapshots[i].ProductID != snapshots[j].ProductID {
+			return snapshots[i].ProductID < snapshots[j].ProductID
+		}
+		if snapshots[i].SizeID != snapshots[j].SizeID {
+			return snapshots[i].SizeID < snapshots[j].SizeID
+		}
+		return snapshots[i].SnapshotTime.Before(snapshots[j].SnapshotTime)
+	})
 
-	for i := 0; i < len(snapshots); i += batchSize {
-		end := i + batchSize
+	// 2. Обрабатываем данные очень маленькими пакетами для уменьшения времени транзакций
+	var lastError error
+	for i := 0; i < len(snapshots); i += smallBatchSize {
+		end := i + smallBatchSize
 		if end > len(snapshots) {
 			end = len(snapshots)
 		}
 
 		batch := snapshots[i:end]
 
-		for _, snapshot := range batch {
-			_, err := stmt.ExecContext(ctx,
-				snapshot.ProductID, snapshot.SizeID, snapshot.Price,
-				snapshot.Discount, snapshot.ClubDiscount, snapshot.FinalPrice,
-				snapshot.ClubFinalPrice, snapshot.CurrencyIsoCode,
-				snapshot.TechSizeName, snapshot.EditableSizePrice, snapshot.SnapshotTime)
-
-			if err != nil {
-				return fmt.Errorf("executing insert: %w", err)
+		// 3. Механизм повторных попыток с экспоненциальной задержкой
+		for attempt := 0; attempt < maxRetries; attempt++ {
+			err := s.insertPriceSnapshotBatchSafely(ctx, batch)
+			if err == nil {
+				// Успешно - переходим к следующему пакету
+				lastError = nil
+				break
 			}
+
+			// Проверяем, был ли это deadlock или другая временная ошибка
+			if strings.Contains(err.Error(), "deadlock detected") ||
+				strings.Contains(err.Error(), "could not serialize access") {
+				// Увеличиваем задержку с каждой попыткой (экспоненциальная задержка)
+				delay := time.Duration(50*(1<<attempt)) * time.Millisecond
+				log.Printf("Deadlock on price snapshot batch %d/%d, attempt %d, retrying after %v",
+					i/smallBatchSize+1, (len(snapshots)-1)/smallBatchSize+1, attempt+1, delay)
+				time.Sleep(delay)
+				lastError = err
+				continue
+			}
+
+			// Другая ошибка - немедленно возвращаем
+			return fmt.Errorf("inserting price snapshot batch %d: %w", i/smallBatchSize+1, err)
+		}
+
+		// Если все попытки не удались
+		if lastError != nil {
+			return fmt.Errorf("failed to insert price snapshot batch %d after %d attempts: %w",
+				i/smallBatchSize+1, maxRetries, lastError)
 		}
 	}
 
-	// Фиксируем транзакцию
+	log.Printf("Successfully processed %d price snapshots in %d small batches",
+		len(snapshots), (len(snapshots)-1)/smallBatchSize+1)
+	return nil
+}
+
+// Безопасная вставка одного мини-пакета снапшотов цен
+func (s *RecordCleanupService) insertPriceSnapshotBatchSafely(ctx context.Context, batch []models.PriceSnapshot) error {
+	// Используем более низкий уровень изоляции
+	tx, err := s.db.BeginTxx(ctx, &sql.TxOptions{
+		Isolation: sql.LevelReadCommitted,
+		ReadOnly:  false,
+	})
+	if err != nil {
+		return fmt.Errorf("starting transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	// Прямая вставка в основную таблицу - без временных таблиц для уменьшения нагрузки
+	stmt, err := tx.PrepareContext(ctx, `
+    INSERT INTO price_snapshots (
+        product_id, size_id, price, discount, club_discount, 
+        final_price, club_final_price, currency_iso_code, 
+        tech_size_name, editable_size_price, snapshot_time
+    ) VALUES (
+        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11
+    )
+    ON CONFLICT (product_id, size_id, snapshot_time) DO UPDATE SET
+        price = EXCLUDED.price,
+        discount = EXCLUDED.discount,
+        club_discount = EXCLUDED.club_discount,
+        final_price = EXCLUDED.final_price,
+        club_final_price = EXCLUDED.club_final_price,
+        currency_iso_code = EXCLUDED.currency_iso_code,
+        tech_size_name = EXCLUDED.tech_size_name,
+        editable_size_price = EXCLUDED.editable_size_price
+`)
+	if err != nil {
+		return fmt.Errorf("preparing statement: %w", err)
+	}
+	defer stmt.Close()
+
+	// Вставляем по одной записи
+	for _, snapshot := range batch {
+		_, err := stmt.ExecContext(ctx,
+			snapshot.ProductID, snapshot.SizeID, snapshot.Price,
+			snapshot.Discount, snapshot.ClubDiscount, snapshot.FinalPrice,
+			snapshot.ClubFinalPrice, snapshot.CurrencyIsoCode,
+			snapshot.TechSizeName, snapshot.EditableSizePrice, snapshot.SnapshotTime)
+		if err != nil {
+			return fmt.Errorf("executing insert: %w", err)
+		}
+	}
+
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("committing transaction: %w", err)
 	}
-
-	log.Printf("Inserted %d price snapshots", len(snapshots))
 
 	return nil
 }
@@ -964,54 +1055,107 @@ func (s *RecordCleanupService) getStockRecordsForPeriodBatch(
 
 // Пакетная вставка снапшотов остатков
 func (s *RecordCleanupService) batchInsertStockSnapshots(ctx context.Context, snapshots []models.StockSnapshot) error {
-	// Используем транзакцию для пакетной вставки
-	tx, err := s.db.BeginTxx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("starting transaction: %w", err)
+	if len(snapshots) == 0 {
+		return nil
 	}
-	defer tx.Rollback()
 
-	// Подготавливаем запрос для пакетной вставки
-	stmt, err := tx.PrepareContext(ctx, `
-        INSERT INTO stock_snapshots (
-            product_id, warehouse_id, amount, snapshot_time
-        ) VALUES (
-            $1, $2, $3, $4
-        )
-        ON CONFLICT (product_id, warehouse_id, snapshot_time) DO NOTHING
-    `)
-	if err != nil {
-		return fmt.Errorf("preparing statement: %w", err)
-	}
-	defer stmt.Close()
+	const maxRetries = 5
+	const smallBatchSize = 200 // Значительно меньший размер пакета
 
-	// Вставляем снапшоты пакетами по 1000 штук
-	batchSize := 1000
+	// 1. Сортируем снапшоты по идентификаторам для обеспечения постоянного порядка доступа
+	sort.Slice(snapshots, func(i, j int) bool {
+		if snapshots[i].ProductID != snapshots[j].ProductID {
+			return snapshots[i].ProductID < snapshots[j].ProductID
+		}
+		if snapshots[i].WarehouseID != snapshots[j].WarehouseID {
+			return snapshots[i].WarehouseID < snapshots[j].WarehouseID
+		}
+		return snapshots[i].SnapshotTime.Before(snapshots[j].SnapshotTime)
+	})
 
-	for i := 0; i < len(snapshots); i += batchSize {
-		end := i + batchSize
+	// 2. Обрабатываем данные очень маленькими пакетами для уменьшения времени транзакций
+	var lastError error
+	for i := 0; i < len(snapshots); i += smallBatchSize {
+		end := i + smallBatchSize
 		if end > len(snapshots) {
 			end = len(snapshots)
 		}
 
 		batch := snapshots[i:end]
 
-		for _, snapshot := range batch {
-			_, err := stmt.ExecContext(ctx,
-				snapshot.ProductID, snapshot.WarehouseID, snapshot.Amount, snapshot.SnapshotTime)
-
-			if err != nil {
-				return fmt.Errorf("executing insert: %w", err)
+		// 3. Механизм повторных попыток с экспоненциальной задержкой
+		for attempt := 0; attempt < maxRetries; attempt++ {
+			err := s.insertStockSnapshotBatchSafely(ctx, batch)
+			if err == nil {
+				// Успешно - переходим к следующему пакету
+				lastError = nil
+				break
 			}
+
+			// Проверяем, был ли это deadlock или другая временная ошибка
+			if strings.Contains(err.Error(), "deadlock detected") ||
+				strings.Contains(err.Error(), "could not serialize access") {
+				// Увеличиваем задержку с каждой попыткой (экспоненциальная задержка)
+				delay := time.Duration(50*(1<<attempt)) * time.Millisecond
+				log.Printf("Deadlock on stock snapshot batch %d/%d, attempt %d, retrying after %v",
+					i/smallBatchSize+1, (len(snapshots)-1)/smallBatchSize+1, attempt+1, delay)
+				time.Sleep(delay)
+				lastError = err
+				continue
+			}
+
+			// Другая ошибка - немедленно возвращаем
+			return fmt.Errorf("inserting stock snapshot batch %d: %w", i/smallBatchSize+1, err)
+		}
+
+		// Если все попытки не удались
+		if lastError != nil {
+			return fmt.Errorf("failed to insert stock snapshot batch %d after %d attempts: %w",
+				i/smallBatchSize+1, maxRetries, lastError)
 		}
 	}
 
-	// Фиксируем транзакцию
+	log.Printf("Successfully processed %d stock snapshots in %d small batches",
+		len(snapshots), (len(snapshots)-1)/smallBatchSize+1)
+	return nil
+}
+
+// Безопасная вставка одного мини-пакета снапшотов
+func (s *RecordCleanupService) insertStockSnapshotBatchSafely(ctx context.Context, batch []models.StockSnapshot) error {
+	// Используем более низкий уровень изоляции
+	tx, err := s.db.BeginTxx(ctx, &sql.TxOptions{
+		Isolation: sql.LevelReadCommitted,
+		ReadOnly:  false,
+	})
+	if err != nil {
+		return fmt.Errorf("starting transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	// Прямая вставка в основную таблицу - без временных таблиц для уменьшения нагрузки
+	stmt, err := tx.PrepareContext(ctx, `
+		INSERT INTO stock_snapshots (product_id, warehouse_id, amount, snapshot_time)
+		VALUES ($1, $2, $3, $4)
+		ON CONFLICT (product_id, warehouse_id, snapshot_time) DO UPDATE SET
+			amount = EXCLUDED.amount
+	`)
+	if err != nil {
+		return fmt.Errorf("preparing statement: %w", err)
+	}
+	defer stmt.Close()
+
+	// Вставляем по одной записи
+	for _, snapshot := range batch {
+		_, err := stmt.ExecContext(ctx,
+			snapshot.ProductID, snapshot.WarehouseID, snapshot.Amount, snapshot.SnapshotTime)
+		if err != nil {
+			return fmt.Errorf("executing insert: %w", err)
+		}
+	}
+
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("committing transaction: %w", err)
 	}
-
-	log.Printf("Inserted %d stock snapshots", len(snapshots))
 
 	return nil
 }
@@ -1126,7 +1270,10 @@ func (s *RecordCleanupService) ensureHourlyPriceSnapshots(
 					CurrencyIsoCode:   latestPrice.CurrencyIsoCode,
 					TechSizeName:      latestPrice.TechSizeName,
 					EditableSizePrice: latestPrice.EditableSizePrice,
-					SnapshotTime:      hourStart,
+
+					SnapshotTime: time.Date(latestPrice.RecordedAt.Year(), latestPrice.RecordedAt.Month(),
+						latestPrice.RecordedAt.Day(), latestPrice.RecordedAt.Hour(), 0, 0, 0,
+						latestPrice.RecordedAt.Location()),
 				}
 
 				_, err = tx.ExecContext(ctx, `
@@ -1137,6 +1284,15 @@ func (s *RecordCleanupService) ensureHourlyPriceSnapshots(
 					) VALUES (
 						$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11
 					)
+					ON CONFLICT (product_id, size_id, snapshot_time) DO UPDATE SET
+						price = EXCLUDED.price,
+						discount = EXCLUDED.discount,
+						club_discount = EXCLUDED.club_discount,
+						final_price = EXCLUDED.final_price,
+						club_final_price = EXCLUDED.club_final_price,
+						currency_iso_code = EXCLUDED.currency_iso_code,
+						tech_size_name = EXCLUDED.tech_size_name,
+						editable_size_price = EXCLUDED.editable_size_price
 				`, snapshotPrice.ProductID, snapshotPrice.SizeID, snapshotPrice.Price,
 					snapshotPrice.Discount, snapshotPrice.ClubDiscount, snapshotPrice.FinalPrice,
 					snapshotPrice.ClubFinalPrice, snapshotPrice.CurrencyIsoCode,
@@ -1254,19 +1410,24 @@ func (s *RecordCleanupService) ensureHourlyStockSnapshots(
 			if snapshotExists == 0 {
 
 				snapshotStock := &models.StockSnapshot{
-					ProductID:    productID,
-					WarehouseID:  warehouseID,
-					Amount:       latestStock.Amount,
-					SnapshotTime: hourStart,
+					ProductID:   productID,
+					WarehouseID: warehouseID,
+					Amount:      latestStock.Amount,
+
+					SnapshotTime: time.Date(latestStock.RecordedAt.Year(), latestStock.RecordedAt.Month(),
+						latestStock.RecordedAt.Day(), latestStock.RecordedAt.Hour(), 0, 0, 0,
+						latestStock.RecordedAt.Location()),
 				}
 
 				_, err = tx.ExecContext(ctx, `
-					INSERT INTO stock_snapshots (
-						product_id, warehouse_id, amount, snapshot_time
-					) VALUES (
-						$1, $2, $3, $4
-					)
-				`, snapshotStock.ProductID, snapshotStock.WarehouseID, snapshotStock.Amount, snapshotStock.SnapshotTime)
+				INSERT INTO stock_snapshots (
+					product_id, warehouse_id, amount, snapshot_time
+				) VALUES (
+					$1, $2, $3, $4
+				)
+				ON CONFLICT (product_id, warehouse_id, snapshot_time) DO UPDATE SET
+					amount = EXCLUDED.amount
+			`, snapshotStock.ProductID, snapshotStock.WarehouseID, snapshotStock.Amount, snapshotStock.SnapshotTime)
 
 				if err != nil {
 					log.Printf("Error inserting hourly stock snapshot for product %d, warehouse %d, hour %s: %v",
@@ -1393,150 +1554,148 @@ func (s *RecordCleanupService) getStockRecordsForPeriod(ctx context.Context, pro
 	return records, nil
 }
 
+type DeletionStats struct {
+	PricesDeleted    int64
+	StocksDeleted    int64
+	BatchesProcessed int64
+	StartTime        time.Time
+	LastBatchTime    time.Time
+}
+
 // Оптимизированная версия удаления старых записей
 func (s *RecordCleanupService) deleteOldRecords(ctx context.Context, retentionDate time.Time) error {
-	// Удаляем цены пакетами для уменьшения нагрузки на БД
-	priceResult, err := s.db.ExecContext(ctx, `
-        WITH old_price_ids AS (
-            SELECT id FROM prices 
-            WHERE recorded_at < $1
-            LIMIT 50000
-        )
-        DELETE FROM prices WHERE id IN (SELECT id FROM old_price_ids)
-    `, retentionDate)
+	log.Printf("Starting deletion of records older than %s", retentionDate.Format("2006-01-02"))
 
+	deleteCtx, cancel := context.WithTimeout(ctx, 6*time.Hour)
+	defer cancel()
+
+	priceStats, err := s.deleteOldPriceRecords(deleteCtx, retentionDate)
 	if err != nil {
-		return fmt.Errorf("deleting old price records: %w", err)
+		return fmt.Errorf("error deleting old price records: %w", err)
 	}
 
-	priceRows, _ := priceResult.RowsAffected()
-	log.Printf("Deleted %d old price records", priceRows)
-
-	// Если были удалены записи, продолжаем удалять пакетами
-	if priceRows > 0 {
-		go s.continueDeleteOldPrices(context.Background(), retentionDate)
-	}
-
-	// Удаляем остатки пакетами для уменьшения нагрузки на БД
-	stockResult, err := s.db.ExecContext(ctx, `
-        WITH old_stock_ids AS (
-            SELECT id FROM stocks 
-            WHERE recorded_at < $1
-            LIMIT 50000
-        )
-        DELETE FROM stocks WHERE id IN (SELECT id FROM old_stock_ids)
-    `, retentionDate)
-
+	stockStats, err := s.deleteOldStockRecords(deleteCtx, retentionDate)
 	if err != nil {
-		return fmt.Errorf("deleting old stock records: %w", err)
+		return fmt.Errorf("error deleting old stock records: %w", err)
 	}
 
-	stockRows, _ := stockResult.RowsAffected()
-	log.Printf("Deleted %d old stock records", stockRows)
+	log.Printf("Record cleanup completed. Deleted %d price records in %d batches, %d stock records in %d batches",
+		priceStats.PricesDeleted, priceStats.BatchesProcessed,
+		stockStats.StocksDeleted, stockStats.BatchesProcessed)
 
-	// Если были удалены записи, продолжаем удалять пакетами
-	if stockRows > 0 {
-		go s.continueDeleteOldStocks(context.Background(), retentionDate)
-	}
-
-	log.Printf("Started background deletion of old records older than %s", retentionDate.Format("2006-01-02"))
 	return nil
 }
 
-// Продолжение удаления старых цен в фоне
-func (s *RecordCleanupService) continueDeleteOldPrices(ctx context.Context, retentionDate time.Time) {
-	// Создаем новый контекст с таймаутом
-	ctx, cancel := context.WithTimeout(ctx, 1*time.Hour)
-	defer cancel()
+func (s *RecordCleanupService) deleteOldPriceRecords(ctx context.Context, retentionDate time.Time) (*DeletionStats, error) {
+	stats := &DeletionStats{
+		StartTime: time.Now(),
+	}
+
+	batchSize := 50000
 
 	for {
-		// Проверяем контекст перед выполнением операции
 		select {
 		case <-ctx.Done():
-			log.Printf("Background price deletion stopped: %v", ctx.Err())
-			return
+			return stats, ctx.Err()
 		default:
-			// продолжаем
 		}
 
-		result, err := s.db.ExecContext(ctx, `
-            WITH old_price_ids AS (
-                SELECT id FROM prices 
-                WHERE recorded_at < $1
-                LIMIT 50000
-            )
-            DELETE FROM prices WHERE id IN (SELECT id FROM old_price_ids)
-        `, retentionDate)
+		batchCtx, cancel := context.WithTimeout(ctx, 50*time.Minute)
+
+		result, err := s.db.ExecContext(batchCtx, `
+			WITH old_price_ids AS (
+				SELECT id FROM prices 
+				WHERE recorded_at < $1
+				LIMIT $2
+			)
+			DELETE FROM prices WHERE id IN (SELECT id FROM old_price_ids)
+		`, retentionDate, batchSize)
+
+		cancel()
 
 		if err != nil {
-			log.Printf("Error during background price deletion: %v", err)
-			return
+			return stats, fmt.Errorf("batch deleting old price records: %w", err)
 		}
 
-		rows, _ := result.RowsAffected()
-		if rows == 0 {
-			log.Printf("Background price deletion completed")
-			return
+		rowsAffected, _ := result.RowsAffected()
+		stats.PricesDeleted += rowsAffected
+		stats.BatchesProcessed++
+		stats.LastBatchTime = time.Now()
+
+		log.Printf("Deleted batch of %d old price records (total: %d)",
+			rowsAffected, stats.PricesDeleted)
+
+		if rowsAffected == 0 {
+			break
 		}
 
-		log.Printf("Deleted additional %d old price records", rows)
-
-		// Пауза между пакетами для снижения нагрузки на БД
 		select {
-		case <-time.After(1 * time.Second):
-			// продолжаем после паузы
+		case <-time.After(500 * time.Millisecond):
 		case <-ctx.Done():
-			log.Printf("Background price deletion stopped: %v", ctx.Err())
-			return
+			return stats, ctx.Err()
 		}
 	}
+
+	duration := time.Since(stats.StartTime)
+	log.Printf("Price records deletion completed. Total deleted: %d in %s",
+		stats.PricesDeleted, duration)
+
+	return stats, nil
 }
 
-// Продолжение удаления старых остатков в фоне
-func (s *RecordCleanupService) continueDeleteOldStocks(ctx context.Context, retentionDate time.Time) {
-	// Создаем новый контекст с таймаутом
-	ctx, cancel := context.WithTimeout(ctx, 1*time.Hour)
-	defer cancel()
+func (s *RecordCleanupService) deleteOldStockRecords(ctx context.Context, retentionDate time.Time) (*DeletionStats, error) {
+	stats := &DeletionStats{
+		StartTime: time.Now(),
+	}
+
+	batchSize := 50000
 
 	for {
-		// Проверяем контекст перед выполнением операции
 		select {
 		case <-ctx.Done():
-			log.Printf("Background stock deletion stopped: %v", ctx.Err())
-			return
+			return stats, ctx.Err()
 		default:
-			// продолжаем
 		}
 
-		result, err := s.db.ExecContext(ctx, `
-            WITH old_stock_ids AS (
-                SELECT id FROM stocks 
-                WHERE recorded_at < $1
-                LIMIT 50000
-            )
-            DELETE FROM stocks WHERE id IN (SELECT id FROM old_stock_ids)
-        `, retentionDate)
+		batchCtx, cancel := context.WithTimeout(ctx, 50*time.Minute)
+
+		result, err := s.db.ExecContext(batchCtx, `
+			WITH old_stock_ids AS (
+				SELECT id FROM stocks 
+				WHERE recorded_at < $1
+				LIMIT $2
+			)
+			DELETE FROM stocks WHERE id IN (SELECT id FROM old_stock_ids)
+		`, retentionDate, batchSize)
+
+		cancel()
 
 		if err != nil {
-			log.Printf("Error during background stock deletion: %v", err)
-			return
+			return stats, fmt.Errorf("batch deleting old stock records: %w", err)
 		}
 
-		rows, _ := result.RowsAffected()
-		if rows == 0 {
-			log.Printf("Background stock deletion completed")
-			return
+		rowsAffected, _ := result.RowsAffected()
+		stats.StocksDeleted += rowsAffected
+		stats.BatchesProcessed++
+		stats.LastBatchTime = time.Now()
+
+		log.Printf("Deleted batch of %d old stock records (total: %d)",
+			rowsAffected, stats.StocksDeleted)
+
+		if rowsAffected == 0 {
+			break
 		}
 
-		log.Printf("Deleted additional %d old stock records", rows)
-
-		// Пауза между пакетами для снижения нагрузки на БД
 		select {
-		case <-time.After(1 * time.Second):
-			// продолжаем после паузы
+		case <-time.After(500 * time.Millisecond):
 		case <-ctx.Done():
-			log.Printf("Background stock deletion stopped: %v", ctx.Err())
-			return
+			return stats, ctx.Err()
 		}
 	}
+
+	duration := time.Since(stats.StartTime)
+	log.Printf("Stock records deletion completed. Total deleted: %d in %s",
+		stats.StocksDeleted, duration)
+
+	return stats, nil
 }

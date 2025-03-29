@@ -50,7 +50,7 @@ func NewEmailService(db *sqlx.DB) (*EmailService, error) {
 	fromAddr := os.Getenv("SMTP_FROM")
 
 	if fromAddr == "" {
-		fromAddr = "noreply@wildberries-monitor.com"
+		fromAddr = "ab@athebyme.ru"
 	}
 
 	service := &EmailService{
@@ -208,23 +208,28 @@ func (e *EmailService) sendEmailWithAuth(to, subject, body, attachmentPath, atta
 
 	return d.DialAndSend(m)
 }
-
 func (e *EmailService) SendReportEmail(to, reportType, period, filePath, reportName string) error {
 
 	if !isValidEmail(to) {
 		return fmt.Errorf("invalid email address: %s", to)
 	}
 
-	subject := fmt.Sprintf("Wildberries %s Report - %s", reportType, period)
+	// Переводим тип отчета на русский для темы
+	reportTypeRus := "цен"
+	if reportType == "stocks" {
+		reportTypeRus = "остатков"
+	}
 
-	body := fmt.Sprintf(`Hello,
+	subject := fmt.Sprintf("Отчет по %s Wildberries - %s", reportTypeRus, period)
 
-Your requested Wildberries %s report for period %s is attached.
+	body := fmt.Sprintf(`Здравствуйте!
 
-Thank you for using Wildberries Monitoring Service!
+Ваш запрошенный отчет по %s Wildberries за период %s прикреплен к этому письму.
 
-This is an automated message, please do not reply.
-`, reportType, period)
+Спасибо за использование сервиса мониторинга Wildberries!
+
+Это автоматическое сообщение, пожалуйста, не отвечайте на него.
+`, reportTypeRus, period)
 
 	maxRetries := 3
 	for attempt := 0; attempt < maxRetries; attempt++ {
@@ -237,7 +242,6 @@ This is an automated message, please do not reply.
 		log.Printf("Attempt %d: Failed to send email: %v", attempt+1, err)
 
 		if attempt < maxRetries-1 {
-
 			retryDelay := time.Duration(attempt+1) * 2 * time.Second
 			time.Sleep(retryDelay)
 		}

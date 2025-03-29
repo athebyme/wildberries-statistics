@@ -105,9 +105,9 @@ func NewMonitoringService(cfg config.Config) (*Service, error) {
 	return &Service{
 		db:               database,
 		config:           cfg,
-		pricesLimiter:    rate.NewLimiter(rate.Every(time.Second*6/10), 1), // 10 запросов за 6 секунд
-		stocksLimiter:    rate.NewLimiter(rate.Every(time.Minute/300), 10), // 300 запросов в минуту
-		warehouseLimiter: rate.NewLimiter(rate.Every(time.Minute/300), 10), // 300 запросов в минуту
+		pricesLimiter:    rate.NewLimiter(rate.Every(time.Second*6/11), 1), // 10 запросов за 6 секунд
+		stocksLimiter:    rate.NewLimiter(rate.Every(time.Minute/200), 10), // 300 запросов в минуту
+		warehouseLimiter: rate.NewLimiter(rate.Every(time.Minute/200), 10), // 300 запросов в минуту
 		telegramBot:      telegramBot,
 		searchEngine:     searchEngine,
 		httpClient:       &client,
@@ -207,6 +207,12 @@ func (m *Service) RunMonitoring(ctx context.Context) error {
 	go m.telegramBot.StartBot(ctx)
 
 	// Запускаем сервис очистки записей
+
+	if m.config.UseImprovedServices {
+		if err := m.UpdateWithImprovedComponents(); err != nil {
+			log.Printf("Error updating with improved components: %v", err)
+		}
+	}
 
 	go func() {
 		err := m.UpdateWarehouses(ctx)
@@ -1212,8 +1218,8 @@ func (m *Service) CheckPriceChanges(ctx context.Context, product *models.Product
 				"Новая цена: %d руб (скидка %d%%)\n"+
 				"Изменение: %.2f%%",
 			product.Name, product.VendorCode,
-			lastPrice.FinalPrice, lastPrice.Discount,
-			newPrice.FinalPrice, newPrice.Discount,
+			lastPrice.Price, int((1.0-float64(lastPrice.FinalPrice)/float64(lastPrice.Price))*100),
+			newPrice.Price, int((1.0-float64(newPrice.FinalPrice)/float64(newPrice.Price))*100),
 			priceDiff,
 		)
 
@@ -1322,4 +1328,8 @@ func (m *Service) UpdatePriceCheckStatus(ctx context.Context, productID int) err
 
 func (m *Service) UpdateStockCheckStatus(ctx context.Context, productID int) error {
 	return db.UpdateStockCheckStatus(ctx, m.db, productID)
+}
+
+func (m *Service) GetDB() *sqlx.DB {
+	return m.db
 }

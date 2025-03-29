@@ -847,7 +847,6 @@ func (b *Bot) sendReportToEmail(chatID int64, userID int64, reportType, period, 
 
 	b.progressTracker.UpdateProgress(operationID, 10, 0, 0, "Начало генерации файла отчета")
 
-	// Генерируем отчет и получаем путь к файлу
 	filePath, reportFileName, err := b.generateReportFile(reportType, period, "excel", operationID)
 	if err != nil {
 		errorMsg := fmt.Sprintf("Ошибка при генерации отчета: %v", err)
@@ -862,7 +861,6 @@ func (b *Bot) sendReportToEmail(chatID int64, userID int64, reportType, period, 
 
 	b.progressTracker.UpdateProgress(operationID, 70, 0, 0, "Файл отчета создан, подготовка к отправке на email")
 
-	// Отправляем email, используя EmailService, если он доступен
 	var sendErr error
 	b.progressTracker.UpdateProgress(operationID, 80, 0, 0,
 		fmt.Sprintf("Отправка отчета на email: %s", email))
@@ -870,7 +868,6 @@ func (b *Bot) sendReportToEmail(chatID int64, userID int64, reportType, period, 
 	if b.emailService != nil {
 		sendErr = b.emailService.SendReportEmail(email, reportType, displayPeriod, filePath, reportFileName)
 	} else {
-		// Обратная совместимость - используем старый метод
 		b.progressTracker.AddWarning(operationID, "Email сервис не инициализирован, используем legacy метод")
 		sendErr = b.sendEmailLegacy(email, reportType, displayPeriod, filePath, reportFileName)
 	}
@@ -890,7 +887,6 @@ func (b *Bot) sendReportToEmail(chatID int64, userID int64, reportType, period, 
 
 	b.cleanupReportMessages(chatID)
 
-	// Спрашиваем, хочет ли пользователь сохранить email
 	var savedEmail string
 	if b.emailService != nil {
 		savedEmail, err = b.emailService.GetUserEmail(userID)
@@ -908,25 +904,22 @@ func (b *Bot) sendReportToEmail(chatID int64, userID int64, reportType, period, 
 
 		successMsg := tgbotapi.NewMessage(
 			chatID,
-			fmt.Sprintf("Отчет успешно отправлен на %s. Сохранить этот email для будущих отчетов?", email),
+			fmt.Sprintf("✅ Отчет успешно отправлен на %s.\n\nХотите сохранить этот адрес электронной почты для будущих отчетов? Сохраненный адрес будет использоваться по умолчанию при следующих отправках.", email),
 		)
 		b.api.Send(successMsg)
 
-		msgWithKeyboard := tgbotapi.NewMessage(chatID, "Выберите действие:")
-		msgWithKeyboard.ReplyMarkup = keyboard
-		b.api.Send(msgWithKeyboard)
+		successMsg.ReplyMarkup = keyboard
+		b.api.Send(successMsg)
 	} else {
 		successMsg := tgbotapi.NewMessage(
 			chatID,
-			fmt.Sprintf("Отчет успешно отправлен на %s.", email),
+			fmt.Sprintf("✅ Отчет успешно отправлен на %s.", email),
 		)
 		b.api.Send(successMsg)
 	}
 
-	// Отмечаем операцию как успешно завершенную
 	b.progressTracker.CompleteOperation(operationID, "")
 
-	// Удаляем временный файл
 	defer os.Remove(filePath)
 }
 

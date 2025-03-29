@@ -36,7 +36,7 @@ func NewExcelGenerator(db *sqlx.DB, reportConfig ReportConfig, workerPoolSize in
 }
 
 func (g *ExcelGenerator) GenerateStockReportExcel(ctx context.Context, startDate, endDate time.Time) (string, string, error) {
-	// Загрузка продуктов и складов
+	// Load products and warehouses
 	type productsResult struct {
 		Products []models.ProductRecord
 		Error    error
@@ -78,7 +78,7 @@ func (g *ExcelGenerator) GenerateStockReportExcel(ctx context.Context, startDate
 		return "", "", fmt.Errorf("no products found in database")
 	}
 
-	// Подготовка данных для пакетных запросов
+	// Prepare data for batch queries
 	productIDs := make([]int, len(products))
 	for i, p := range products {
 		productIDs[i] = p.ID
@@ -89,13 +89,14 @@ func (g *ExcelGenerator) GenerateStockReportExcel(ctx context.Context, startDate
 		warehouseIDs[i] = w.ID
 	}
 
-	// Получение остатков для всех продуктов и складов одним запросом
-	productStocks, err := db.GetBatchStocksForProducts(ctx, g.db, productIDs, warehouseIDs, startDate, endDate)
+	// Get stocks for all products and warehouses in one batch query
+	// Using the new snapshot-based function
+	productStocks, err := db.GetBatchStockSnapshotsForProducts(ctx, g.db, productIDs, warehouseIDs, startDate, endDate)
 	if err != nil {
-		return "", "", fmt.Errorf("error fetching stocks data: %w", err)
+		return "", "", fmt.Errorf("error fetching stock snapshots data: %w", err)
 	}
 
-	// Создание Excel-файла
+	// Create Excel file
 	f := excelize.NewFile()
 	defer func() {
 		if err := f.Close(); err != nil {
@@ -112,13 +113,13 @@ func (g *ExcelGenerator) GenerateStockReportExcel(ctx context.Context, startDate
 		return "", "", fmt.Errorf("error creating detail sheet: %w", err)
 	}
 
-	// Создание стилей и заголовков
+	// Create styles and headers
 	headerStyle, numberStyle, percentStyle, err := g.createExcelStyles(f)
 	if err != nil {
 		return "", "", fmt.Errorf("error creating excel styles: %w", err)
 	}
 
-	// Добавляем заголовки
+	// Add headers
 	summaryHeaders := []string{
 		"Product", "Vendor Code", "Initial Stock", "Final Stock",
 		"Change", "Change (%)", "Records",
@@ -127,13 +128,13 @@ func (g *ExcelGenerator) GenerateStockReportExcel(ctx context.Context, startDate
 	g.addHeaders(f, summarySheetName, summaryHeaders, headerStyle)
 
 	detailHeaders := []string{
-		"Товар", "Артикул", "Склад", "Начальный остаток", "Конечный остаток",
-		"Изменение", "Изменение (%)", "Мин. остаток", "Макс. остаток", "Записей",
+		"Product", "Vendor Code", "Warehouse", "Initial Stock", "Final Stock",
+		"Change", "Change (%)", "Min Stock", "Max Stock", "Records",
 	}
 
 	g.addHeaders(f, detailSheetName, detailHeaders, headerStyle)
 
-	// Подготовка данных для отчета
+	// Prepare report data
 	var summaries []models.ProductSummary
 	var details []models.WarehouseDetail
 
@@ -215,7 +216,7 @@ func (g *ExcelGenerator) GenerateStockReportExcel(ctx context.Context, startDate
 		})
 	}
 
-	// Сортировка результатов
+	// Sort results
 	sort.Slice(summaries, func(i, j int) bool {
 		return summaries[i].Product.Name < summaries[j].Product.Name
 	})
@@ -227,7 +228,7 @@ func (g *ExcelGenerator) GenerateStockReportExcel(ctx context.Context, startDate
 		return details[i].Warehouse.Name < details[j].Warehouse.Name
 	})
 
-	// Заполнение листа с итогами
+	// Fill summary sheet
 	summaryRow := 2
 	for _, summary := range summaries {
 		f.SetCellValue(summarySheetName, fmt.Sprintf("A%d", summaryRow), summary.Product.Name)
@@ -241,7 +242,7 @@ func (g *ExcelGenerator) GenerateStockReportExcel(ctx context.Context, startDate
 		summaryRow++
 	}
 
-	// Заполнение детального листа
+	// Fill detail sheet
 	detailRow := 2
 	for _, detail := range details {
 		f.SetCellValue(detailSheetName, fmt.Sprintf("A%d", detailRow), detail.Product.Name)
@@ -258,7 +259,7 @@ func (g *ExcelGenerator) GenerateStockReportExcel(ctx context.Context, startDate
 		detailRow++
 	}
 
-	// Применение стилей
+	// Apply styles
 	if summaryRow > 2 {
 		f.SetCellStyle(summarySheetName, "C2", fmt.Sprintf("E%d", summaryRow-1), numberStyle)
 		f.SetCellStyle(summarySheetName, "G2", fmt.Sprintf("G%d", summaryRow-1), numberStyle)
@@ -271,14 +272,14 @@ func (g *ExcelGenerator) GenerateStockReportExcel(ctx context.Context, startDate
 		f.SetCellStyle(detailSheetName, "G2", fmt.Sprintf("G%d", detailRow-1), percentStyle)
 	}
 
-	// Добавление листа с трендами (с ограничением количества продуктов)
-	g.addStockTrendSheetOptimized(ctx, f, products, warehouses, productStocks, startDate, endDate)
+	// Add trends sheet with limited number of products
+	g.addStockTrendSheetOptimizedFromSnapshots(ctx, f, products, warehouses, productStocks, startDate, endDate)
 
-	// Настройка ширины столбцов
+	// Adjust column widths
 	g.adjustColumnWidths(f, summarySheetName, summaryHeaders)
 	g.adjustColumnWidths(f, detailSheetName, detailHeaders)
 
-	// Сохранение файла
+	// Save file
 	filename := fmt.Sprintf("stock_report_%s_%s.xlsx",
 		startDate.Format("02-01-2006"),
 		endDate.Format("02-01-2006"))
@@ -291,24 +292,14 @@ func (g *ExcelGenerator) GenerateStockReportExcel(ctx context.Context, startDate
 	return filePath, filename, nil
 }
 
-// Оптимизированная версия для добавления листа с трендами
-func (g *ExcelGenerator) addStockTrendSheetOptimized(
-	ctx context.Context,
-	f *excelize.File,
-	products []models.ProductRecord,
-	warehouses []models.Warehouse,
-	productStocks map[int]map[int64][]models.StockRecord,
-	startDate, endDate time.Time,
-) error {
+func (g *ExcelGenerator) addStockTrendSheetOptimizedFromSnapshots(ctx context.Context, f *excelize.File,
+	products []models.ProductRecord, warehouses []models.Warehouse,
+	productStocks map[int]map[int64][]models.StockRecord, startDate, endDate time.Time) error {
+
 	trendSheetName := "Stock Trends"
 	_, err := f.NewSheet(trendSheetName)
 	if err != nil {
 		return fmt.Errorf("error creating trend sheet: %w", err)
-	}
-
-	headers := []string{
-		"Товар", "Артикул", "Склад", "Дата/Время", "Предыдущий остаток",
-		"Новый остаток", "Изменение", "Изменение (%)",
 	}
 
 	headerStyle, err := f.NewStyle(&excelize.Style{
@@ -326,17 +317,33 @@ func (g *ExcelGenerator) addStockTrendSheetOptimized(
 		return fmt.Errorf("error creating header style: %w", err)
 	}
 
-	g.addHeaders(f, trendSheetName, headers, headerStyle)
+	headers := []string{
+		"Product", "Vendor Code", "Warehouse", "Date/Time", "Previous Stock",
+		"New Stock", "Change", "Change (%)",
+	}
 
-	// Анализ трендов только для ограниченного числа продуктов с наибольшими изменениями
+	for i, header := range headers {
+		cell := fmt.Sprintf("%c1", 'A'+i)
+		f.SetCellValue(trendSheetName, cell, header)
+	}
+
+	f.SetCellStyle(trendSheetName, "A1", string(rune('A'+len(headers)-1))+"1", headerStyle)
+
+	// Style for significant changes
+	significantChangeStyle, _ := f.NewStyle(&excelize.Style{
+		Fill: excelize.Fill{Type: "pattern", Color: []string{"#ffeb9c"}, Pattern: 1},
+	})
+
+	// Analyze trends only for a limited number of products with the largest changes
 	type ProductWithChange struct {
 		Product       models.ProductRecord
 		ChangePercent float64
 	}
 
 	var topChanges []ProductWithChange
-	maxProductsToAnalyze := 20 // Ограничиваем количество продуктов для анализа трендов
+	maxProductsToAnalyze := 20 // Limit the number of products for trend analysis
 
+	// Find products with significant changes
 	for _, product := range products {
 		totalInitialStock := 0
 		totalFinalStock := 0
@@ -374,19 +381,19 @@ func (g *ExcelGenerator) addStockTrendSheetOptimized(
 		}
 	}
 
-	// Сортируем по убыванию процента изменения
+	// Sort by decreasing change percentage
 	sort.Slice(topChanges, func(i, j int) bool {
 		return topChanges[i].ChangePercent > topChanges[j].ChangePercent
 	})
 
-	// Ограничиваем количество продуктов для детального анализа
+	// Limit the number of products for detailed analysis
 	if len(topChanges) > maxProductsToAnalyze {
 		topChanges = topChanges[:maxProductsToAnalyze]
 	}
 
 	row := 2
 
-	// Добавляем значительные изменения в таблицу трендов
+	// Add significant changes to the trends table
 	for _, productChange := range topChanges {
 		product := productChange.Product
 
@@ -398,7 +405,7 @@ func (g *ExcelGenerator) addStockTrendSheetOptimized(
 
 			firstEntryForProductWarehouse := true
 
-			// Анализируем только значительные изменения
+			// Analyze only significant changes
 			for i := 1; i < len(stocks); i++ {
 				prevStock := stocks[i-1].Amount
 				newStock := stocks[i].Amount
@@ -419,7 +426,7 @@ func (g *ExcelGenerator) addStockTrendSheetOptimized(
 					continue
 				}
 
-				// Заполняем данные
+				// Fill in data
 				if firstEntryForProductWarehouse {
 					f.SetCellValue(trendSheetName, fmt.Sprintf("A%d", row), product.Name)
 					f.SetCellValue(trendSheetName, fmt.Sprintf("B%d", row), product.VendorCode)
@@ -436,16 +443,24 @@ func (g *ExcelGenerator) addStockTrendSheetOptimized(
 				f.SetCellValue(trendSheetName, fmt.Sprintf("G%d", row), stockChange)
 				f.SetCellValue(trendSheetName, fmt.Sprintf("H%d", row), changePercent/100)
 
+				// Highlight significant changes (>10%)
+				if math.Abs(changePercent) > 10.0 {
+					for col := 'A'; col <= 'H'; col++ {
+						cellRef := fmt.Sprintf("%c%d", col, row)
+						f.SetCellStyle(trendSheetName, cellRef, cellRef, significantChangeStyle)
+					}
+				}
+
 				row++
 			}
 
 			if !firstEntryForProductWarehouse {
-				row++ // Добавляем пустую строку между складами
+				row++ // Add empty row between warehouses
 			}
 		}
 	}
 
-	// Применяем стили
+	// Apply styles
 	if row > 2 {
 		numberStyle, _ := f.NewStyle(&excelize.Style{NumFmt: 1})
 		percentStyle, _ := f.NewStyle(&excelize.Style{NumFmt: 10})
@@ -454,9 +469,10 @@ func (g *ExcelGenerator) addStockTrendSheetOptimized(
 		f.SetCellStyle(trendSheetName, "H2", fmt.Sprintf("H%d", row-1), percentStyle)
 	}
 
-	// Настройка ширины столбцов
+	// Adjust column widths
 	g.adjustColumnWidths(f, trendSheetName, headers)
-	f.SetColWidth(trendSheetName, "D", "D", 20) // Для даты/времени
+	f.SetColWidth(trendSheetName, "D", "D", 20) // For date/time
+	f.SetColWidth(trendSheetName, "A", "A", 30) // For product name
 
 	return nil
 }
@@ -692,6 +708,399 @@ func (g *ExcelGenerator) addStockTrendSheet(ctx context.Context, f *excelize.Fil
 	return nil
 }
 
+func (g *ExcelGenerator) GeneratePriceReportExcelOptimized(ctx context.Context, startDate, endDate time.Time) (string, string, error) {
+	products, err := db.GetAllProducts(ctx, g.db)
+	if err != nil {
+		return "", "", fmt.Errorf("error getting products: %w", err)
+	}
+
+	if len(products) == 0 {
+		return "", "", fmt.Errorf("no products found in database")
+	}
+
+	// Get product IDs for batch query
+	productIDs := make([]int, len(products))
+	for i, product := range products {
+		productIDs[i] = product.ID
+	}
+
+	// Fetch all prices in a single batch query using the snapshots table
+	allPrices, err := db.GetBatchPriceSnapshotsForProducts(ctx, g.db, productIDs, startDate, endDate)
+	if err != nil {
+		return "", "", fmt.Errorf("error fetching batch price snapshots: %w", err)
+	}
+
+	f := excelize.NewFile()
+	defer func() {
+		if err := f.Close(); err != nil {
+			log.Printf("Error closing Excel file: %v", err)
+		}
+	}()
+
+	const sheetName = "Price Report"
+	f.SetSheetName("Sheet1", sheetName)
+
+	headerStyle, err := f.NewStyle(&excelize.Style{
+		Font:      &excelize.Font{Bold: true},
+		Fill:      excelize.Fill{Type: "pattern", Color: []string{"#DDEBF7"}, Pattern: 1},
+		Alignment: &excelize.Alignment{Horizontal: "center", Vertical: "center"},
+		Border: []excelize.Border{
+			{Type: "top", Color: "#000000", Style: 1},
+			{Type: "left", Color: "#000000", Style: 1},
+			{Type: "right", Color: "#000000", Style: 1},
+			{Type: "bottom", Color: "#000000", Style: 1},
+		},
+	})
+	if err != nil {
+		return "", "", fmt.Errorf("error creating header style: %w", err)
+	}
+
+	numberStyle, err := f.NewStyle(&excelize.Style{
+		NumFmt: 2,
+	})
+	if err != nil {
+		return "", "", fmt.Errorf("error creating number style: %w", err)
+	}
+
+	percentStyle, err := f.NewStyle(&excelize.Style{
+		NumFmt: 10,
+	})
+	if err != nil {
+		return "", "", fmt.Errorf("error creating percentage style: %w", err)
+	}
+
+	headers := []string{
+		"Product", "Vendor Code", "Initial Price (₽)", "Final Price (₽)",
+		"Change (₽)", "Change (%)", "Min Price (₽)", "Max Price (₽)", "Records",
+	}
+
+	for i, header := range headers {
+		cell := fmt.Sprintf("%c1", 'A'+i)
+		f.SetCellValue(sheetName, cell, header)
+	}
+
+	f.SetCellStyle(sheetName, "A1", string(rune('A'+len(headers)-1))+"1", headerStyle)
+
+	type ProductResult struct {
+		Product           models.ProductRecord
+		FirstPrice        int
+		LastPrice         int
+		PriceChange       int
+		ChangePercent     float64
+		MinPrice          int
+		MaxPrice          int
+		RecordsCount      int
+		HasSignificantChg bool
+	}
+
+	// Process all products concurrently using a worker pool
+	var results []ProductResult
+	var wg sync.WaitGroup
+	var mutex sync.Mutex // To protect the results slice during concurrent access
+
+	sem := make(chan struct{}, g.workerPoolSize)
+
+	for _, product := range products {
+		wg.Add(1)
+		go func(prod models.ProductRecord) {
+			defer wg.Done()
+
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			// Get prices from the batch result
+			prices, exists := allPrices[prod.ID]
+			if !exists || len(prices) < 2 {
+				return
+			}
+
+			firstPrice := prices[0].FinalPrice
+			lastPrice := prices[len(prices)-1].FinalPrice
+
+			minPrice, maxPrice := firstPrice, firstPrice
+			for _, price := range prices {
+				if price.FinalPrice < minPrice {
+					minPrice = price.FinalPrice
+				}
+				if price.FinalPrice > maxPrice {
+					maxPrice = price.FinalPrice
+				}
+			}
+
+			priceChange := lastPrice - firstPrice
+			changePercent := 0.0
+			if firstPrice > 0 {
+				changePercent = float64(priceChange) / float64(firstPrice) * 100
+			}
+
+			hasSignificantChange := false
+			if math.Abs(changePercent) >= g.reportConfig.MinPriceChangePercent {
+				hasSignificantChange = true
+			}
+
+			result := ProductResult{
+				Product:           prod,
+				FirstPrice:        firstPrice,
+				LastPrice:         lastPrice,
+				PriceChange:       priceChange,
+				ChangePercent:     changePercent,
+				MinPrice:          minPrice,
+				MaxPrice:          maxPrice,
+				RecordsCount:      len(prices),
+				HasSignificantChg: hasSignificantChange,
+			}
+
+			// Thread-safe append to results
+			mutex.Lock()
+			results = append(results, result)
+			mutex.Unlock()
+		}(product)
+	}
+
+	wg.Wait()
+
+	sort.Slice(results, func(i, j int) bool {
+		return results[i].Product.Name < results[j].Product.Name
+	})
+
+	row := 2
+	for _, result := range results {
+		f.SetCellValue(sheetName, fmt.Sprintf("A%d", row), result.Product.Name)
+		f.SetCellValue(sheetName, fmt.Sprintf("B%d", row), result.Product.VendorCode)
+		f.SetCellValue(sheetName, fmt.Sprintf("C%d", row), result.FirstPrice)
+		f.SetCellValue(sheetName, fmt.Sprintf("D%d", row), result.LastPrice)
+		f.SetCellValue(sheetName, fmt.Sprintf("E%d", row), result.PriceChange)
+		f.SetCellValue(sheetName, fmt.Sprintf("F%d", row), result.ChangePercent/100)
+		f.SetCellValue(sheetName, fmt.Sprintf("G%d", row), result.MinPrice)
+		f.SetCellValue(sheetName, fmt.Sprintf("H%d", row), result.MaxPrice)
+		f.SetCellValue(sheetName, fmt.Sprintf("I%d", row), result.RecordsCount)
+
+		row++
+	}
+
+	if row > 2 {
+		f.SetCellStyle(sheetName, "C2", fmt.Sprintf("E%d", row-1), numberStyle)
+		f.SetCellStyle(sheetName, "G2", fmt.Sprintf("H%d", row-1), numberStyle)
+		f.SetCellStyle(sheetName, "F2", fmt.Sprintf("F%d", row-1), percentStyle)
+	}
+
+	for i := range headers {
+		col := string(rune('A' + i))
+		width, _ := f.GetColWidth(sheetName, col)
+		if width < 15 {
+			f.SetColWidth(sheetName, col, col, 15)
+		}
+	}
+
+	// Use the optimized price trend sheet with snapshot data
+	err = g.addPriceTrendSheetOptimizedFromSnapshots(ctx, f, products, startDate, endDate)
+	if err != nil {
+		log.Printf("Warning: Could not add price trend sheet: %v", err)
+	}
+
+	filename := fmt.Sprintf("price_report_%s_%s.xlsx",
+		startDate.Format("02-01-2006"),
+		endDate.Format("02-01-2006"))
+	filePath := filepath.Join(os.TempDir(), filename)
+
+	if err := f.SaveAs(filePath); err != nil {
+		return "", "", fmt.Errorf("error saving Excel file: %w", err)
+	}
+
+	return filePath, filename, nil
+}
+
+func (g *ExcelGenerator) addPriceTrendSheetOptimizedFromSnapshots(ctx context.Context, f *excelize.File, products []models.ProductRecord, startDate, endDate time.Time) error {
+	trendSheetName := "Price Trends"
+	_, err := f.NewSheet(trendSheetName)
+	if err != nil {
+		return fmt.Errorf("error creating trend sheet: %w", err)
+	}
+
+	headerStyle, err := f.NewStyle(&excelize.Style{
+		Font:      &excelize.Font{Bold: true},
+		Fill:      excelize.Fill{Type: "pattern", Color: []string{"#DDEBF7"}, Pattern: 1},
+		Alignment: &excelize.Alignment{Horizontal: "center"},
+		Border: []excelize.Border{
+			{Type: "top", Color: "#000000", Style: 1},
+			{Type: "left", Color: "#000000", Style: 1},
+			{Type: "right", Color: "#000000", Style: 1},
+			{Type: "bottom", Color: "#000000", Style: 1},
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("error creating header style: %w", err)
+	}
+
+	headers := []string{
+		"Product", "Vendor Code", "Date/Time", "Previous Price (₽)",
+		"New Price (₽)", "Change (₽)", "Change (%)", "Discount (%)",
+	}
+
+	for i, header := range headers {
+		cell := fmt.Sprintf("%c1", 'A'+i)
+		f.SetCellValue(trendSheetName, cell, header)
+	}
+
+	f.SetCellStyle(trendSheetName, "A1", string(rune('A'+len(headers)-1))+"1", headerStyle)
+
+	// Create style for significant changes
+	significantChangeStyle, _ := f.NewStyle(&excelize.Style{
+		Fill: excelize.Fill{Type: "pattern", Color: []string{"#ffeb9c"}, Pattern: 1},
+	})
+
+	// Limit the number of products for detailed analysis
+	maxProductsToProcess := 100
+	if len(products) > maxProductsToProcess {
+		products = products[:maxProductsToProcess]
+	}
+
+	// Get product IDs for batch query
+	productIDs := make([]int, 0, len(products))
+	for _, product := range products {
+		productIDs = append(productIDs, product.ID)
+	}
+
+	// Get prices for all products in one query using snapshots
+	allPrices, err := db.GetBatchPriceSnapshotsForProducts(ctx, g.db, productIDs, startDate, endDate)
+	if err != nil {
+		return fmt.Errorf("error fetching batch price snapshots: %w", err)
+	}
+
+	// Prepare data for report
+	type PriceChange struct {
+		Product       models.ProductRecord
+		Time          time.Time
+		PreviousPrice int
+		NewPrice      int
+		Change        int
+		ChangePercent float64
+		Discount      int
+	}
+
+	var significantChanges []PriceChange
+
+	// Analyze price changes for each product
+	for _, product := range products {
+		prices, exists := allPrices[product.ID]
+		if !exists || len(prices) < 2 {
+			continue
+		}
+
+		// Analyze all records for significant changes
+		for i := 1; i < len(prices); i++ {
+			previousPrice := prices[i-1].FinalPrice
+			newPrice := prices[i].FinalPrice
+
+			if previousPrice == newPrice {
+				continue
+			}
+
+			priceChange := newPrice - previousPrice
+			changePercent := 0.0
+			if previousPrice > 0 {
+				changePercent = float64(priceChange) / float64(previousPrice) * 100
+			} else if newPrice > 0 {
+				changePercent = 100.0
+			}
+
+			// Check if change exceeds threshold
+			if math.Abs(changePercent) >= g.reportConfig.MinPriceChangePercent {
+				// Calculate discount (ratio of FinalPrice to Price)
+				discount := 0
+				if prices[i].Price > 0 && prices[i].FinalPrice > 0 {
+					discount = int((1.0 - float64(prices[i].FinalPrice)/float64(prices[i].Price)) * 100)
+				}
+
+				significantChanges = append(significantChanges, PriceChange{
+					Product:       product,
+					Time:          prices[i].RecordedAt,
+					PreviousPrice: previousPrice,
+					NewPrice:      newPrice,
+					Change:        priceChange,
+					ChangePercent: changePercent,
+					Discount:      discount,
+				})
+			}
+		}
+	}
+
+	// Sort changes by product and time
+	sort.Slice(significantChanges, func(i, j int) bool {
+		if significantChanges[i].Product.ID != significantChanges[j].Product.ID {
+			return significantChanges[i].Product.Name < significantChanges[j].Product.Name
+		}
+		return significantChanges[i].Time.Before(significantChanges[j].Time)
+	})
+
+	// Fill table
+	row := 2
+	currentProductID := -1
+
+	for _, change := range significantChanges {
+		// If new product, fill name and vendor code
+		if change.Product.ID != currentProductID {
+			// Add empty row between products (except first)
+			if currentProductID != -1 {
+				row++
+			}
+			currentProductID = change.Product.ID
+			f.SetCellValue(trendSheetName, fmt.Sprintf("A%d", row), change.Product.Name)
+			f.SetCellValue(trendSheetName, fmt.Sprintf("B%d", row), change.Product.VendorCode)
+		} else {
+			// For same product leave empty
+			f.SetCellValue(trendSheetName, fmt.Sprintf("A%d", row), "")
+			f.SetCellValue(trendSheetName, fmt.Sprintf("B%d", row), "")
+		}
+
+		f.SetCellValue(trendSheetName, fmt.Sprintf("C%d", row), change.Time.Format("02.01.2006 15:04:05"))
+		f.SetCellValue(trendSheetName, fmt.Sprintf("D%d", row), change.PreviousPrice)
+		f.SetCellValue(trendSheetName, fmt.Sprintf("E%d", row), change.NewPrice)
+		f.SetCellValue(trendSheetName, fmt.Sprintf("F%d", row), change.Change)
+		f.SetCellValue(trendSheetName, fmt.Sprintf("G%d", row), change.ChangePercent/100)
+		f.SetCellValue(trendSheetName, fmt.Sprintf("H%d", row), float64(change.Discount)/100)
+
+		// Apply color highlighting for rows with significant changes (> 10%)
+		if math.Abs(change.ChangePercent) > 10.0 {
+			for col := 'A'; col <= 'H'; col++ {
+				cellRef := fmt.Sprintf("%c%d", col, row)
+				f.SetCellStyle(trendSheetName, cellRef, cellRef, significantChangeStyle)
+			}
+		}
+
+		row++
+	}
+
+	// If no significant changes found, add message
+	if len(significantChanges) == 0 {
+		f.SetCellValue(trendSheetName, "A2", "No significant price changes found for the selected period")
+		row++
+	}
+
+	// Apply styles for numbers and percentages
+	if row > 2 {
+		numberStyle, _ := f.NewStyle(&excelize.Style{NumFmt: 0}) // Integer for pennies/kopeks
+		percentStyle, _ := f.NewStyle(&excelize.Style{NumFmt: 10})
+
+		f.SetCellStyle(trendSheetName, "D2", fmt.Sprintf("F%d", row-1), numberStyle)
+		f.SetCellStyle(trendSheetName, "G2", fmt.Sprintf("H%d", row-1), percentStyle)
+	}
+
+	// Adjust column widths
+	for i := range headers {
+		col := string(rune('A' + i))
+		f.SetColWidth(trendSheetName, col, col, 15)
+	}
+
+	f.SetColWidth(trendSheetName, "C", "C", 20) // For date/time
+	f.SetColWidth(trendSheetName, "A", "A", 30) // For product name
+
+	log.Printf("Price trend report generated. Processed %d records for %d products",
+		len(significantChanges), len(allPrices))
+
+	return nil
+}
+
 func (g *ExcelGenerator) GeneratePriceReportExcel(ctx context.Context, startDate, endDate time.Time) (string, string, error) {
 
 	products, err := db.GetAllProducts(ctx, g.db)
@@ -870,7 +1279,7 @@ func (g *ExcelGenerator) GeneratePriceReportExcel(ctx context.Context, startDate
 		}
 	}
 
-	err = g.addPriceTrendSheet(ctx, f, products, startDate, endDate)
+	err = g.addPriceTrendSheetOptimized(ctx, f, products, startDate, endDate)
 	if err != nil {
 		log.Printf("Warning: Could not add price trend sheet: %v", err)
 	}
@@ -888,7 +1297,7 @@ func (g *ExcelGenerator) GeneratePriceReportExcel(ctx context.Context, startDate
 }
 
 // Исправленная функция addPriceTrendSheet для корректного отображения динамики цен
-func (g *ExcelGenerator) addPriceTrendSheet(ctx context.Context, f *excelize.File, products []models.ProductRecord, startDate, endDate time.Time) error {
+func (g *ExcelGenerator) addPriceTrendSheetOptimized(ctx context.Context, f *excelize.File, products []models.ProductRecord, startDate, endDate time.Time) error {
 	trendSheetName := "Динамика цен"
 	_, err := f.NewSheet(trendSheetName)
 	if err != nil {
@@ -927,48 +1336,45 @@ func (g *ExcelGenerator) addPriceTrendSheet(ctx context.Context, f *excelize.Fil
 		Fill: excelize.Fill{Type: "pattern", Color: []string{"#ffeb9c"}, Pattern: 1},
 	})
 
-	row := 2
-	productsProcessed := 0
-	maxProductsToProcess := 100 // Увеличено с 20
+	// Ограничиваем количество продуктов для детального анализа
+	maxProductsToProcess := 100
+	if len(products) > maxProductsToProcess {
+		products = products[:maxProductsToProcess]
+	}
 
-	// Для отладки - сохраняем информацию обо всех обработанных продуктах
-	var debugInfo []string
-
-	// Перебираем все продукты
+	// Получаем идентификаторы продуктов для пакетного запроса
+	productIDs := make([]int, 0, len(products))
 	for _, product := range products {
-		if productsProcessed >= maxProductsToProcess {
-			break
-		}
+		productIDs = append(productIDs, product.ID)
+	}
 
-		// Отладочная информация
-		debugInfo = append(debugInfo, fmt.Sprintf("Обработка продукта: %s (id: %d)", product.Name, product.ID))
+	// Получаем цены для всех продуктов одним запросом
+	allPrices, err := db.GetBatchPricesForProducts(ctx, g.db, productIDs, startDate, endDate)
+	if err != nil {
+		return fmt.Errorf("error fetching batch prices: %w", err)
+	}
 
-		// Запрашиваем историю цен для продукта
-		prices, err := db.GetPricesForPeriod(ctx, g.db, product.ID, startDate, endDate)
-		if err != nil {
-			debugInfo = append(debugInfo, fmt.Sprintf("  Ошибка при получении цен: %v", err))
+	// Подготавливаем данные для отчета
+	type PriceChange struct {
+		Product       models.ProductRecord
+		Time          time.Time
+		PreviousPrice int
+		NewPrice      int
+		Change        int
+		ChangePercent float64
+		Discount      int
+	}
+
+	var significantChanges []PriceChange
+
+	// Анализируем изменения цен для каждого продукта
+	for _, product := range products {
+		prices, exists := allPrices[product.ID]
+		if !exists || len(prices) < 2 {
 			continue
 		}
 
-		if len(prices) < 2 {
-			debugInfo = append(debugInfo, fmt.Sprintf("  Найдено только %d записей о ценах (нужно минимум 2)", len(prices)))
-			continue
-		}
-
-		debugInfo = append(debugInfo, fmt.Sprintf("  Найдено %d записей о ценах", len(prices)))
-
-		// Массив для хранения значительных изменений
-		var significantChanges []struct {
-			Time          time.Time
-			PreviousPrice int
-			NewPrice      int
-			Change        int
-			ChangePercent float64
-			Discount      int
-		}
-
-		// ВАЖНОЕ ИСПРАВЛЕНИЕ: Проверяем все записи на наличие изменений
-		// Используем Price вместо FinalPrice
+		// Анализируем все записи на наличие значительных изменений
 		for i := 1; i < len(prices); i++ {
 			previousPrice := prices[i-1].Price
 			newPrice := prices[i].Price
@@ -981,30 +1387,20 @@ func (g *ExcelGenerator) addPriceTrendSheet(ctx context.Context, f *excelize.Fil
 			changePercent := 0.0
 			if previousPrice > 0 {
 				changePercent = float64(priceChange) / float64(previousPrice) * 100
+			} else if newPrice > 0 {
+				changePercent = 100.0
 			}
-
-			// Отладка - записываем информацию об изменении
-			debugInfo = append(debugInfo, fmt.Sprintf("  Изменение #%d: %d -> %d (%.2f%%)",
-				i, previousPrice, newPrice, changePercent))
 
 			// Проверяем, превышает ли изменение порог
 			if math.Abs(changePercent) >= g.reportConfig.MinPriceChangePercent {
-				debugInfo = append(debugInfo, "    Значительное изменение!")
-
 				// Вычисляем скидку (соотношение FinalPrice к Price)
 				discount := 0
 				if prices[i].Price > 0 && prices[i].FinalPrice > 0 {
 					discount = int((1.0 - float64(prices[i].FinalPrice)/float64(prices[i].Price)) * 100)
 				}
 
-				significantChanges = append(significantChanges, struct {
-					Time          time.Time
-					PreviousPrice int
-					NewPrice      int
-					Change        int
-					ChangePercent float64
-					Discount      int
-				}{
+				significantChanges = append(significantChanges, PriceChange{
+					Product:       product,
 					Time:          prices[i].RecordedAt,
 					PreviousPrice: previousPrice,
 					NewPrice:      newPrice,
@@ -1014,53 +1410,57 @@ func (g *ExcelGenerator) addPriceTrendSheet(ctx context.Context, f *excelize.Fil
 				})
 			}
 		}
-
-		if len(significantChanges) == 0 {
-			debugInfo = append(debugInfo, "  Нет значительных изменений цен для этого продукта")
-			continue
-		}
-
-		productsProcessed++
-		debugInfo = append(debugInfo, fmt.Sprintf("  Добавляется %d значительных изменений в отчет", len(significantChanges)))
-
-		// Добавляем каждое значительное изменение в таблицу
-		for _, change := range significantChanges {
-			// Имя товара и артикул заполняются для каждой строки
-			f.SetCellValue(trendSheetName, fmt.Sprintf("A%d", row), product.Name)
-			f.SetCellValue(trendSheetName, fmt.Sprintf("B%d", row), product.VendorCode)
-
-			f.SetCellValue(trendSheetName, fmt.Sprintf("C%d", row), change.Time.Format("02.01.2006 15:04:05"))
-			f.SetCellValue(trendSheetName, fmt.Sprintf("D%d", row), change.PreviousPrice)
-			f.SetCellValue(trendSheetName, fmt.Sprintf("E%d", row), change.NewPrice)
-			f.SetCellValue(trendSheetName, fmt.Sprintf("F%d", row), change.Change)
-			f.SetCellValue(trendSheetName, fmt.Sprintf("G%d", row), change.ChangePercent/100)
-			f.SetCellValue(trendSheetName, fmt.Sprintf("H%d", row), float64(change.Discount)/100)
-
-			// Применяем выделение цветом для строк с значительными изменениями
-			if math.Abs(change.ChangePercent) > 10.0 {
-				for col := 'A'; col <= 'H'; col++ {
-					cellRef := fmt.Sprintf("%c%d", col, row)
-					f.SetCellStyle(trendSheetName, cellRef, cellRef, significantChangeStyle)
-				}
-			}
-
-			row++
-		}
-
-		row++ // Пустая строка между товарами
 	}
 
-	// Если нет данных о значительных изменениях, добавляем сообщение и отладочную информацию
-	if row == 2 {
-		f.SetCellValue(trendSheetName, "A2", "Не найдено значительных изменений цен за выбранный период")
+	// Сортируем изменения по продукту и времени
+	sort.Slice(significantChanges, func(i, j int) bool {
+		if significantChanges[i].Product.ID != significantChanges[j].Product.ID {
+			return significantChanges[i].Product.Name < significantChanges[j].Product.Name
+		}
+		return significantChanges[i].Time.Before(significantChanges[j].Time)
+	})
 
-		// Добавляем отладочную информацию на отдельный лист
-		debugSheetName := "Debug Info"
-		f.NewSheet(debugSheetName)
-		for i, line := range debugInfo {
-			f.SetCellValue(debugSheetName, fmt.Sprintf("A%d", i+1), line)
+	// Заполняем таблицу
+	row := 2
+	currentProductID := -1
+
+	for _, change := range significantChanges {
+		// Если новый продукт, заполняем имя и артикул
+		if change.Product.ID != currentProductID {
+			// Добавляем пустую строку между продуктами (кроме первого)
+			if currentProductID != -1 {
+				row++
+			}
+			currentProductID = change.Product.ID
+			f.SetCellValue(trendSheetName, fmt.Sprintf("A%d", row), change.Product.Name)
+			f.SetCellValue(trendSheetName, fmt.Sprintf("B%d", row), change.Product.VendorCode)
+		} else {
+			// Для того же продукта оставляем пустыми
+			f.SetCellValue(trendSheetName, fmt.Sprintf("A%d", row), "")
+			f.SetCellValue(trendSheetName, fmt.Sprintf("B%d", row), "")
 		}
 
+		f.SetCellValue(trendSheetName, fmt.Sprintf("C%d", row), change.Time.Format("02.01.2006 15:04:05"))
+		f.SetCellValue(trendSheetName, fmt.Sprintf("D%d", row), change.PreviousPrice)
+		f.SetCellValue(trendSheetName, fmt.Sprintf("E%d", row), change.NewPrice)
+		f.SetCellValue(trendSheetName, fmt.Sprintf("F%d", row), change.Change)
+		f.SetCellValue(trendSheetName, fmt.Sprintf("G%d", row), change.ChangePercent/100)
+		f.SetCellValue(trendSheetName, fmt.Sprintf("H%d", row), float64(change.Discount)/100)
+
+		// Применяем выделение цветом для строк со значительными изменениями (> 10%)
+		if math.Abs(change.ChangePercent) > 10.0 {
+			for col := 'A'; col <= 'H'; col++ {
+				cellRef := fmt.Sprintf("%c%d", col, row)
+				f.SetCellStyle(trendSheetName, cellRef, cellRef, significantChangeStyle)
+			}
+		}
+
+		row++
+	}
+
+	// Если нет данных о значительных изменениях, добавляем сообщение
+	if len(significantChanges) == 0 {
+		f.SetCellValue(trendSheetName, "A2", "Не найдено значительных изменений цен за выбранный период")
 		row++
 	}
 
@@ -1081,6 +1481,9 @@ func (g *ExcelGenerator) addPriceTrendSheet(ctx context.Context, f *excelize.Fil
 
 	f.SetColWidth(trendSheetName, "C", "C", 20) // Для даты/времени
 	f.SetColWidth(trendSheetName, "A", "A", 30) // Для названия товара
+
+	log.Printf("Отчет о динамике цен сформирован. Обработано %d записей для %d продуктов",
+		len(significantChanges), len(allPrices))
 
 	return nil
 }
