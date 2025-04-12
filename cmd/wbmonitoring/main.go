@@ -5,6 +5,7 @@ import (
 	"errors"
 	"github.com/gorilla/mux"
 	"github.com/jmoiron/sqlx"
+	"github.com/rs/cors"
 	"log"
 	"net/http"
 	"os"
@@ -103,6 +104,21 @@ func main() {
 
 	router := mux.NewRouter()
 
+	corsMiddleware := cors.New(cors.Options{
+		AllowedOrigins: []string{
+			"http://147.45.79.183:3000", // Ваш фронтенд
+			"http://localhost:3000",     // Локальная разработка
+		},
+		AllowedMethods: []string{
+			"GET", "POST", "PUT", "DELETE", "OPTIONS",
+		},
+		AllowedHeaders: []string{
+			"Accept", "Content-Type", "Content-Length", "Accept-Encoding",
+			"X-CSRF-Token", "Authorization",
+		},
+		AllowCredentials: true,
+	})
+
 	var apiRouter *mux.Router
 	if basePath != "" {
 		apiRouter = router.PathPrefix("/" + basePath).Subrouter()
@@ -132,9 +148,11 @@ func main() {
 		router.PathPrefix("/src/").Handler(http.StripPrefix("/src/", fs))
 	}
 
+	handler := corsMiddleware.Handler(router)
+
 	srv := &http.Server{
 		Addr:         ":" + port,
-		Handler:      router,
+		Handler:      handler,
 		ReadTimeout:  15 * time.Second,
 		WriteTimeout: 15 * time.Second,
 		IdleTimeout:  60 * time.Second,
@@ -142,7 +160,7 @@ func main() {
 
 	go func() {
 		log.Printf("Запуск веб-сервера на порту :%s (Instance: %s)", port, instanceID)
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Fatalf("Ошибка при запуске сервера: %v", err)
 		}
 	}()
