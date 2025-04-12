@@ -28,27 +28,6 @@ func NewHandlers(db *sqlx.DB) *Handlers {
 	}
 }
 
-func (h *Handlers) RegisterRoutes(router *mux.Router) {
-	statsAPI := router.PathPrefix("/api/stats").Subrouter()
-
-	statsAPI.Use(auth.AuthMiddleware)
-
-	// Add endpoints
-	statsAPI.HandleFunc("/overview", h.GetOverviewStats).Methods("GET")
-	statsAPI.HandleFunc("/products", h.GetTopProducts).Methods("GET")
-	statsAPI.HandleFunc("/price-changes", h.GetPriceChanges).Methods("GET")
-	statsAPI.HandleFunc("/stock-changes", h.GetStockChanges).Methods("GET")
-	statsAPI.HandleFunc("/stock-changes/paginated", h.GetStockChangesWithPagination).Methods("POST")
-	statsAPI.HandleFunc("/price-changes/paginated", h.GetPriceChangesWithPagination).Methods("POST")
-	statsAPI.HandleFunc("/price-history/{id}", h.GetPriceHistory).Methods("GET")
-	statsAPI.HandleFunc("/stock-history/{id}/{warehouseId}", h.GetStockHistory).Methods("GET")
-
-	// Public route for the stats page (redirects to login if not authenticated)
-	router.HandleFunc("/stats", h.StatsPage).Methods("GET")
-
-	log.Println("Registered authenticated stats API routes")
-}
-
 // StatsPage обрабатывает запрос на страницу статистики
 func (h *Handlers) StatsPage(w http.ResponseWriter, r *http.Request) {
 	// Здесь должен быть код для рендеринга шаблона
@@ -69,26 +48,19 @@ func (h *Handlers) StatsPage(w http.ResponseWriter, r *http.Request) {
 
 // RegisterAPIRoutes регистрирует API маршруты для статистики
 func (h *Handlers) RegisterAPIRoutes(router *mux.Router) {
-	// API маршруты
 	statsAPI := router.PathPrefix("/api/stats").Subrouter()
+	statsAPI.Use(auth.AuthMiddleware)
 
 	statsAPI.HandleFunc("/overview", h.GetOverviewStats).Methods("GET")
 	statsAPI.HandleFunc("/products", h.GetTopProducts).Methods("GET")
-
-	// Стандартный обработчик изменений цен (для обратной совместимости)
-	statsAPI.HandleFunc("/price-changes", h.GetPriceChanges).Methods("GET")
-
-	// Новые обработчики с пагинацией
-	statsAPI.HandleFunc("/price-changes/paginated", h.GetPriceChangesWithPagination).Methods("GET")
-
-	statsAPI.HandleFunc("/stock-changes", h.GetStockChanges).Methods("GET")
-	statsAPI.HandleFunc("/stock-changes/paginated", h.GetStockChangesWithPagination).Methods("GET")
+	statsAPI.HandleFunc("/price-changes", h.GetPriceChangesWithPagination).Methods("POST")
+	statsAPI.HandleFunc("/stock-changes", h.GetStockChangesWithPagination).Methods("POST")
 	statsAPI.HandleFunc("/price-history/{id}", h.GetPriceHistory).Methods("GET")
 	statsAPI.HandleFunc("/stock-history/{id}/{warehouseId}", h.GetStockHistory).Methods("GET")
 	statsAPI.HandleFunc("/warehouses", h.GetWarehouses).Methods("GET")
 
-	// Маршрут для принудительного обновления кэша
 	statsAPI.HandleFunc("/refresh-cache", h.RefreshCacheHandler).Methods("POST")
+	router.HandleFunc("/stats", h.StatsPage).Methods("GET")
 
 	log.Println("Зарегистрированы API маршруты статистики")
 }

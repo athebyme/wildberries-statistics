@@ -136,7 +136,7 @@ func main() {
 
 	// Register stats handlers on the protected router
 	statsHandlers := stats.NewHandlers(service.GetDB())
-	statsHandlers.RegisterRoutes(protectedAPIRouter)
+	statsHandlers.RegisterAPIRoutes(protectedAPIRouter)
 
 	// Serve static files
 	fs := http.FileServer(http.Dir("./public"))
