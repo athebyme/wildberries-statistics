@@ -104,7 +104,7 @@ func main() {
 
 	router := mux.NewRouter()
 
-	c := cors.New(cors.Options{
+	cors_h := cors.New(cors.Options{
 		AllowedOrigins:   []string{"http://147.45.79.183:3000", "*"},
 		AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
 		AllowedHeaders:   []string{"Accept", "Content-Type", "Content-Length", "Accept-Encoding", "X-CSRF-Token", "Authorization"},
@@ -141,7 +141,7 @@ func main() {
 		router.PathPrefix("/src/").Handler(http.StripPrefix("/src/", fs))
 	}
 
-	handler := corsMiddleware.Handler(router)
+	handler := cors_h.Handler(router)
 
 	srv := &http.Server{
 		Addr:         ":" + port,
