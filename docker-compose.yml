@@ -19,6 +19,8 @@ services:
       retries: 5
     env_file:
       - .env.db-first
+    networks:
+      - default
 
   # Первое приложение с индивидуальными переменными окружения
   wb-monitoring-first:
@@ -54,6 +56,8 @@ services:
       retries: 5
     env_file:
       - .env.db-second
+    networks:
+      - default
 
   # Второе приложение со своими переменными окружения
   wb-monitoring-second:
@@ -89,6 +93,8 @@ services:
         condition: service_healthy
     env_file:
       - .env.auth
+    networks:
+      - default
 
   # Database for Auth Service
   auth-db:
@@ -107,12 +113,15 @@ services:
       timeout: 5s
       retries: 5
     env_file:
-      - .env.auth-db
+      - .env.auth-db\
+    networks:
+      - default
 
 volumes:
   postgres-first:
   postgres-second:
   auth-db-data:
+
 networks:
   default:
     driver: bridge
