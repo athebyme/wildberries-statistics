@@ -10,6 +10,7 @@ import (
 
 	"github.com/gorilla/mux"
 	"github.com/jmoiron/sqlx"
+	"wbmonitoring/monitoring/internal/auth"
 )
 
 // Handlers содержит обработчики HTTP-запросов для API статистики
@@ -27,27 +28,25 @@ func NewHandlers(db *sqlx.DB) *Handlers {
 	}
 }
 
-// RegisterRoutes регистрирует обработчики API в маршрутизаторе
 func (h *Handlers) RegisterRoutes(router *mux.Router) {
-	// Обработчики API
 	statsAPI := router.PathPrefix("/api/stats").Subrouter()
 
+	statsAPI.Use(auth.AuthMiddleware)
+
+	// Add endpoints
 	statsAPI.HandleFunc("/overview", h.GetOverviewStats).Methods("GET")
 	statsAPI.HandleFunc("/products", h.GetTopProducts).Methods("GET")
 	statsAPI.HandleFunc("/price-changes", h.GetPriceChanges).Methods("GET")
 	statsAPI.HandleFunc("/stock-changes", h.GetStockChanges).Methods("GET")
-
-	// Добавляем новый маршрут для пагинированных запросов
 	statsAPI.HandleFunc("/stock-changes/paginated", h.GetStockChangesWithPagination).Methods("POST")
 	statsAPI.HandleFunc("/price-changes/paginated", h.GetPriceChangesWithPagination).Methods("POST")
-
 	statsAPI.HandleFunc("/price-history/{id}", h.GetPriceHistory).Methods("GET")
 	statsAPI.HandleFunc("/stock-history/{id}/{warehouseId}", h.GetStockHistory).Methods("GET")
 
-	// Обработчик для страницы статистики (рендерит HTML-шаблон)
+	// Public route for the stats page (redirects to login if not authenticated)
 	router.HandleFunc("/stats", h.StatsPage).Methods("GET")
 
-	log.Println("Зарегистрированы маршруты API статистики")
+	log.Println("Registered authenticated stats API routes")
 }
 
 // StatsPage обрабатывает запрос на страницу статистики
@@ -129,8 +128,12 @@ func (h *Handlers) GetOverviewStats(w http.ResponseWriter, r *http.Request) {
 	sendJSONResponse(w, stats)
 }
 
-// RefreshCacheHandler принудительно обновляет кэш статистики
 func (h *Handlers) RefreshCacheHandler(w http.ResponseWriter, r *http.Request) {
+	if !auth.HasRole(r, "admin") {
+		http.Error(w, "Unauthorized", http.StatusForbidden)
+		return
+	}
+
 	_, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
 

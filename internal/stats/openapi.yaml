@@ -1,0 +1,527 @@
+openapi: 3.0.0
+info:
+  title: Статистика Wildberries API
+  description: API для отслеживания статистики товаров и изменений на Wildberries
+  version: 1.0.0
+
+servers:
+  - url: http://localhost:8080
+    description: Локальный сервер разработки
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  schemas:
+    Error:
+      type: object
+      properties:
+        error:
+          type: boolean
+          example: true
+        message:
+          type: string
+          example: "Internal server error"
+        code:
+          type: integer
+          example: 500
+
+    PriceChangeFilter:
+      type: object
+      properties:
+        minChangePercent:
+          type: number
+          format: float
+          nullable: true
+          description: Минимальное изменение цены в процентах
+        maxChangePercent:
+          type: number
+          format: float
+          nullable: true
+          description: Максимальное изменение цены в процентах
+        minChangeAmount:
+          type: integer
+          nullable: true
+          description: Минимальное абсолютное изменение цены
+        since:
+          type: string
+          format: date-time
+          nullable: true
+          description: Начальная дата периода для фильтрации
+        onlyIncreases:
+          type: boolean
+          nullable: true
+          description: Только повышения цен
+        onlyDecreases:
+          type: boolean
+          nullable: true
+          description: Только понижения цен
+
+    StockChangeFilter:
+      type: object
+      properties:
+        warehouseId:
+          type: integer
+          format: int64
+          nullable: true
+          description: ID склада для фильтрации
+        minChangePercent:
+          type: number
+          format: float
+          nullable: true
+          description: Минимальное изменение остатков в процентах
+        minChangeAmount:
+          type: integer
+          nullable: true
+          description: Минимальное абсолютное изменение остатков
+        since:
+          type: string
+          format: date-time
+          nullable: true
+          description: Начальная дата периода для фильтрации
+
+    PaginationRequest:
+      type: object
+      properties:
+        limit:
+          type: integer
+          description: Максимальное количество записей в ответе
+          default: 20
+        cursor:
+          type: string
+          description: Курсор для пагинации
+        refresh:
+          type: boolean
+          description: Флаг для принудительного обновления кэша
+          default: false
+
+    PriceChangesRequest:
+      allOf:
+        - $ref: '#/components/schemas/PaginationRequest'
+        - type: object
+          properties:
+            filter:
+              $ref: '#/components/schemas/PriceChangeFilter'
+
+    StockChangesRequest:
+      allOf:
+        - $ref: '#/components/schemas/PaginationRequest'
+        - type: object
+          properties:
+            warehouseId:
+              type: integer
+              format: int64
+              nullable: true
+            minChangePercent:
+              type: number
+              format: float
+              nullable: true
+            minChangeAmount:
+              type: integer
+              nullable: true
+            since:
+              type: string
+              format: date-time
+              nullable: true
+
+    Warehouse:
+      type: object
+      properties:
+        name:
+          type: string
+          description: Название склада
+        officeID:
+          type: integer
+          format: int64
+          description: ID офиса
+        id:
+          type: integer
+          format: int64
+          description: ID склада
+        cargoType:
+          type: integer
+          description: Тип груза
+        deliveryType:
+          type: integer
+          description: Тип доставки
+
+    OverviewStats:
+      type: object
+      properties:
+        totalProducts:
+          type: integer
+          description: Общее количество товаров
+        totalWarehouses:
+          type: integer
+          description: Общее количество складов
+        lastUpdate:
+          type: string
+          format: date-time
+          description: Время последнего обновления
+
+    PriceChange:
+      type: object
+      properties:
+        productId:
+          type: integer
+          description: ID товара
+        productName:
+          type: string
+          description: Название товара
+        vendorCode:
+          type: string
+          description: Артикул
+        oldPrice:
+          type: number
+          description: Старая цена
+        newPrice:
+          type: number
+          description: Новая цена
+        changeAmount:
+          type: number
+          description: Абсолютное изменение цены
+        changePercent:
+          type: number
+          description: Процентное изменение цены
+        date:
+          type: string
+          format: date-time
+          description: Дата изменения
+
+    StockChange:
+      type: object
+      properties:
+        productId:
+          type: integer
+          description: ID товара
+        productName:
+          type: string
+          description: Название товара
+        vendorCode:
+          type: string
+          description: Артикул
+        warehouseId:
+          type: integer
+          format: int64
+          description: ID склада
+        warehouseName:
+          type: string
+          description: Название склада
+        oldAmount:
+          type: integer
+          description: Старое количество
+        newAmount:
+          type: integer
+          description: Новое количество
+        changeAmount:
+          type: integer
+          description: Абсолютное изменение количества
+        changePercent:
+          type: number
+          description: Процентное изменение количества
+        date:
+          type: string
+          format: date-time
+          description: Дата изменения
+
+    PaginatedResponse:
+      type: object
+      properties:
+        items:
+          type: array
+          description: Список элементов
+        nextCursor:
+          type: string
+          description: Курсор для следующей страницы
+        hasMore:
+          type: boolean
+          description: Есть ли еще элементы
+        totalCount:
+          type: integer
+          description: Общее количество элементов
+
+    PriceChangesResponse:
+      allOf:
+        - $ref: '#/components/schemas/PaginatedResponse'
+        - type: object
+          properties:
+            items:
+              type: array
+              items:
+                $ref: '#/components/schemas/PriceChange'
+
+    StockChangesResponse:
+      allOf:
+        - $ref: '#/components/schemas/PaginatedResponse'
+        - type: object
+          properties:
+            items:
+              type: array
+              items:
+                $ref: '#/components/schemas/StockChange'
+
+    PriceHistoryPoint:
+      type: object
+      properties:
+        date:
+          type: string
+          format: date-time
+          description: Дата записи
+        price:
+          type: number
+          description: Цена на данную дату
+        discount:
+          type: integer
+          description: Скидка в процентах
+
+    StockHistoryPoint:
+      type: object
+      properties:
+        date:
+          type: string
+          format: date-time
+          description: Дата записи
+        amount:
+          type: integer
+          description: Количество товара на складе
+
+    PriceHistory:
+      type: object
+      properties:
+        productId:
+          type: integer
+          description: ID товара
+        points:
+          type: array
+          items:
+            $ref: '#/components/schemas/PriceHistoryPoint'
+          description: Точки истории изменения цен
+
+    StockHistory:
+      type: object
+      properties:
+        productId:
+          type: integer
+          description: ID товара
+        warehouseId:
+          type: integer
+          format: int64
+          description: ID склада
+        points:
+          type: array
+          items:
+            $ref: '#/components/schemas/StockHistoryPoint'
+          description: Точки истории изменения остатков
+
+security:
+  - bearerAuth: []
+
+paths:
+  /api/stats/overview:
+    get:
+      summary: Получение общей статистики
+      description: Возвращает общую статистику по товарам и складам
+      parameters:
+        - name: refresh
+          in: query
+          description: Флаг для принудительного обновления кэша
+          schema:
+            type: boolean
+            default: false
+      responses:
+        '200':
+          description: Успешный ответ
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OverviewStats'
+        '401':
+          description: Не авторизован
+        '500':
+          description: Ошибка сервера
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/stats/products:
+    get:
+      summary: Получение топовых продуктов
+      description: Возвращает список топовых продуктов
+      parameters:
+        - name: limit
+          in: query
+          description: Максимальное количество продуктов в ответе
+          schema:
+            type: integer
+            default: 10
+        - name: refresh
+          in: query
+          description: Флаг для принудительного обновления кэша
+          schema:
+            type: boolean
+            default: false
+      responses:
+        '200':
+          description: Успешный ответ
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    id:
+                      type: integer
+                    name:
+                      type: string
+                    vendorCode:
+                      type: string
+                    sales:
+                      type: integer
+        '401':
+          description: Не авторизован
+        '500':
+          description: Ошибка сервера
+
+  /api/stats/warehouses:
+    get:
+      summary: Получение списка складов
+      description: Возвращает список всех доступных складов
+      responses:
+        '200':
+          description: Успешный ответ
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Warehouse'
+        '401':
+          description: Не авторизован
+        '500':
+          description: Ошибка сервера
+
+  /api/stats/price-changes:
+    post:
+      summary: Получение изменений цен с пагинацией
+      description: Возвращает историю изменений цен с пагинацией и фильтрацией
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PriceChangesRequest'
+      responses:
+        '200':
+          description: Успешный ответ
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PriceChangesResponse'
+        '400':
+          description: Неверный запрос
+        '401':
+          description: Не авторизован
+        '500':
+          description: Ошибка сервера
+
+  /api/stats/stock-changes:
+    post:
+      summary: Получение изменений остатков с пагинацией
+      description: Возвращает историю изменений остатков на складах с пагинацией и фильтрацией
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/StockChangesRequest'
+      responses:
+        '200':
+          description: Успешный ответ
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StockChangesResponse'
+        '400':
+          description: Неверный запрос
+        '401':
+          description: Не авторизован
+        '500':
+          description: Ошибка сервера
+
+  /api/stats/price-history/{id}:
+    get:
+      summary: Получение истории цен для товара
+      description: Возвращает историю изменения цен для указанного товара
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: ID товара
+          schema:
+            type: integer
+        - name: days
+          in: query
+          description: Количество дней для истории
+          schema:
+            type: integer
+            default: 30
+      responses:
+        '200':
+          description: Успешный ответ
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PriceHistory'
+        '400':
+          description: Неверный ID товара
+        '401':
+          description: Не авторизован
+        '404':
+          description: Товар не найден
+        '500':
+          description: Ошибка сервера
+
+  /api/stats/stock-history/{id}/{warehouseId}:
+    get:
+      summary: Получение истории остатков для товара
+      description: Возвращает историю изменения остатков указанного товара на конкретном складе
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: ID товара
+          schema:
+            type: integer
+        - name: warehouseId
+          in: path
+          required: true
+          description: ID склада
+          schema:
+            type: integer
+            format: int64
+        - name: days
+          in: query
+          description: Количество дней для истории
+          schema:
+            type: integer
+            default: 30
+      responses:
+        '200':
+          description: Успешный ответ
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StockHistory'
+        '400':
+          description: Неверные параметры
+        '401':
+          description: Не авторизован
+        '404':
+          description: Товар или склад не найден
+        '500':
+          description: Ошибка сервера

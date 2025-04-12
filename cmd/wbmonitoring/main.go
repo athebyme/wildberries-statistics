@@ -3,17 +3,18 @@ package main
 import (
 	"context"
 	"errors"
+	"github.com/gorilla/mux"
+	"github.com/jmoiron/sqlx"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
+	"wbmonitoring/monitoring/internal/auth"
 	"wbmonitoring/monitoring/internal/config"
 	"wbmonitoring/monitoring/internal/monitoring"
 	"wbmonitoring/monitoring/internal/stats"
-
-	"github.com/gorilla/mux"
 )
 
 func main() {
@@ -60,6 +61,12 @@ func main() {
 		log.Fatalf("Failed to initialize database: %v", err)
 	}
 
+	// Initialize authentication
+	authHandler, err := setupAuth(service.GetDB())
+	if err != nil {
+		log.Fatalf("Failed to initialize authentication: %v", err)
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -104,10 +111,18 @@ func main() {
 		apiRouter = router
 	}
 
+	// Register authentication routes (public)
+	authHandler.RegisterRoutes(apiRouter)
+
+	// Create a protected subrouter for stats and other authenticated endpoints
+	protectedAPIRouter := apiRouter.PathPrefix("/api/stats").Subrouter()
+	protectedAPIRouter.Use(auth.AuthMiddleware)
+
+	// Register stats handlers on the protected router
 	statsHandlers := stats.NewHandlers(service.GetDB())
+	statsHandlers.RegisterRoutes(protectedAPIRouter)
 
-	statsHandlers.RegisterRoutes(apiRouter)
-
+	// Serve static files
 	fs := http.FileServer(http.Dir("./public"))
 
 	if basePath != "" {
@@ -146,4 +161,31 @@ func main() {
 
 	cancel()
 	log.Printf("Сервер успешно остановлен (Instance: %s)", instanceID)
+}
+
+func setupAuth(db *sqlx.DB) (*auth.AuthHandler, error) {
+	authHandler, err := auth.NewAuthHandler(db)
+	if err != nil {
+		return nil, err
+	}
+
+	ctx := context.Background()
+	adminUsername := os.Getenv("ADMIN_USERNAME")
+	adminPassword := os.Getenv("ADMIN_PASSWORD")
+
+	if adminUsername != "" && adminPassword != "" {
+		repo, _ := auth.NewUserRepository(db)
+		user, _ := repo.GetUserByUsername(ctx, adminUsername)
+
+		if user == nil {
+			_, err = repo.CreateUser(ctx, adminUsername, adminPassword, []string{"admin"})
+			if err != nil {
+				log.Printf("Failed to create default admin: %v", err)
+			} else {
+				log.Println("Created default admin user")
+			}
+		}
+	}
+
+	return authHandler, nil
 }

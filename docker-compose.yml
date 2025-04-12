@@ -5,18 +5,20 @@ services:
     image: postgres:15-alpine
     restart: always
     environment:
-      POSTGRES_USER: bananzza
-      POSTGRES_PASSWORD: bananzza_monitor
-      POSTGRES_DB: db_first
+      POSTGRES_USER: ${DB_FIRST_USER}
+      POSTGRES_PASSWORD: ${DB_FIRST_PASSWORD}
+      POSTGRES_DB: ${DB_FIRST_NAME}
     volumes:
       - postgres-first:/var/lib/postgresql/data
     ports:
-      - "5432:5432"
+      - "${DB_FIRST_PORT}:5432"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U bananzza -d db_first"]
+      test: ["CMD-SHELL", "pg_isready -U ${DB_FIRST_USER} -d ${DB_FIRST_NAME}"]
       interval: 10s
       timeout: 5s
       retries: 5
+    env_file:
+      - .env.db-first
 
   # Первое приложение с индивидуальными переменными окружения
   wb-monitoring-first:
@@ -25,44 +27,30 @@ services:
     depends_on:
       db-first:
         condition: service_healthy
+    env_file:
+      - .env.app-first
     environment:
-      - WB_API_KEY=
-      - TELEGRAM_TOKEN=
-      - TELEGRAM_CHAT_ID=
-      - PG_CONN_STRING=
-      - MONITORING_INTERVAL_MIN=10
-      - PRODUCT_UPDATE_INTERVAL_HOUR=12
-      - PRICE_THRESHOLD=10
-      - STOCK_THRESHOLD=100
-      - WORKER_COUNT=5
-      - MAX_RETRIES=3
-      - RETRY_INTERVAL_SEC=5
-      - REQUEST_TIMEOUT_SEC=100
-      - TELEGRAM_ALLOWED_USER_IDS=
-      - SMTP_HOST=mailhog  # Имя сервиса MailHog в Docker Compose сети
-      - SMTP_PORT=1025     # Стандартный SMTP порт MailHog
-      - SMTP_USER=""       # MailHog не требует авторизации
-      - SMTP_PASSWORD=""   # MailHog не требует авторизации
-      - SMTP_SSL=false
-      - USE_IMPROVED_SERVICES=true
+      - PG_CONN_STRING=postgresql://${DB_FIRST_USER}:${DB_FIRST_PASSWORD}@db-first:5432/${DB_FIRST_NAME}?sslmode=disable
 
   # База данных для второго приложения
   db-second:
     image: postgres:15-alpine
     restart: always
     environment:
-      POSTGRES_USER: lasciva
-      POSTGRES_PASSWORD: lasciva
-      POSTGRES_DB: db_second
+      POSTGRES_USER: ${DB_SECOND_USER}
+      POSTGRES_PASSWORD: ${DB_SECOND_PASSWORD}
+      POSTGRES_DB: ${DB_SECOND_NAME}
     volumes:
       - postgres-second:/var/lib/postgresql/data
     ports:
-      - "5433:5432"
+      - "${DB_SECOND_PORT}:5432"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U lasciva -d db_second"]
+      test: ["CMD-SHELL", "pg_isready -U ${DB_SECOND_USER} -d ${DB_SECOND_NAME}"]
       interval: 10s
       timeout: 5s
       retries: 5
+    env_file:
+      - .env.db-second
 
   # Второе приложение со своими переменными окружения
   wb-monitoring-second:
@@ -71,33 +59,51 @@ services:
     depends_on:
       db-second:
         condition: service_healthy
+    env_file:
+      - .env.app-second
     environment:
-      - WB_API_KEY=
-      - TELEGRAM_TOKEN=
-      - TELEGRAM_CHAT_ID=
-      - PG_CONN_STRING=
-      - MONITORING_INTERVAL_MIN=10
-      - PRODUCT_UPDATE_INTERVAL_HOUR=5
-      - PRICE_THRESHOLD=10
-      - STOCK_THRESHOLD=100
-      - WORKER_COUNT=5
-      - MAX_RETRIES=3
-      - RETRY_INTERVAL_SEC=5
-      - REQUEST_TIMEOUT_SEC=100
-      - TELEGRAM_ALLOWED_USER_IDS=
-      - SMTP_HOST=mailhog  # Имя сервиса MailHog в Docker Compose сети
-      - SMTP_PORT=1025     # Стандартный SMTP порт MailHog
-      - SMTP_USER=""       # MailHog не требует авторизации
-      - SMTP_PASSWORD=""   # MailHog не требует авторизации
-      - SMTP_SSL=false
-      - USE_IMPROVED_SERVICES=true
+      - PG_CONN_STRING=postgresql://${DB_SECOND_USER}:${DB_SECOND_PASSWORD}@db-second:5432/${DB_SECOND_NAME}?sslmode=disable
 
-  mailhog:
-    image: mailhog/mailhog:latest
+  # Auth Service (Keycloak)
+  auth-service:
+    image: quay.io/keycloak/keycloak:latest
+    restart: always
+    environment:
+      - KEYCLOAK_ADMIN=${KEYCLOAK_ADMIN}
+      - KEYCLOAK_ADMIN_PASSWORD=${KEYCLOAK_ADMIN_PASSWORD}
+      - KC_DB=postgres
+      - KC_DB_URL=jdbc:postgresql://auth-db:5432/keycloak
+      - KC_DB_USERNAME=${AUTH_DB_USER}
+      - KC_DB_PASSWORD=${AUTH_DB_PASSWORD}
     ports:
-      - "1025:1025" # SMTP порт
-      - "8025:8025" # Web UI порт
-    container_name: mailhog # Опционально, для удобства
+      - "8080:8080"
+    command: ["start-dev"]
+    depends_on:
+      auth-db:
+        condition: service_healthy
+    env_file:
+      - .env.auth
+
+  # Database for Auth Service
+  auth-db:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_USER: ${AUTH_DB_USER}
+      POSTGRES_PASSWORD: ${AUTH_DB_PASSWORD}
+      POSTGRES_DB: keycloak
+    volumes:
+      - auth-db-data:/var/lib/postgresql/data
+    ports:
+      - "${AUTH_DB_PORT}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${AUTH_DB_USER} -d keycloak"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    env_file:
+      - .env.auth-db
+
 volumes:
   postgres-first:
   postgres-second:
+  auth-db-data:
