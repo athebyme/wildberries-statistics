@@ -113,7 +113,7 @@ services:
       timeout: 5s
       retries: 5
     env_file:
-      - .env.auth-db\
+      - .env.auth-db
     networks:
       - default
 
