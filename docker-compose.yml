@@ -31,6 +31,9 @@ services:
       - .env.app-first
     environment:
       - PG_CONN_STRING=postgresql://${DB_FIRST_USER}:${DB_FIRST_PASSWORD}@db-first:5432/${DB_FIRST_NAME}?sslmode=disable
+    networks:
+      - default
+      - web
 
   # База данных для второго приложения
   db-second:
@@ -63,6 +66,9 @@ services:
       - .env.app-second
     environment:
       - PG_CONN_STRING=postgresql://${DB_SECOND_USER}:${DB_SECOND_PASSWORD}@db-second:5432/${DB_SECOND_NAME}?sslmode=disable
+    networks:
+      - default
+      - web
 
   # Auth Service (Keycloak)
   auth-service:
@@ -107,3 +113,8 @@ volumes:
   postgres-first:
   postgres-second:
   auth-db-data:
+networks:
+  default:
+    driver: bridge
+  web:
+    external: true
