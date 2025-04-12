@@ -104,21 +104,12 @@ func main() {
 
 	router := mux.NewRouter()
 
-	corsMiddleware := cors.New(cors.Options{
-		AllowedOrigins: []string{
-			"http://147.45.79.183:3000",
-			"http://localhost:8080",
-			"http://localhost:8081",
-			"http://localhost:8082",
-		},
-		AllowedMethods: []string{
-			"GET", "POST", "PUT", "DELETE", "OPTIONS",
-		},
-		AllowedHeaders: []string{
-			"Accept", "Content-Type", "Content-Length", "Accept-Encoding",
-			"X-CSRF-Token", "Authorization",
-		},
+	c := cors.New(cors.Options{
+		AllowedOrigins:   []string{"http://147.45.79.183:3000", "*"},
+		AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
+		AllowedHeaders:   []string{"Accept", "Content-Type", "Content-Length", "Accept-Encoding", "X-CSRF-Token", "Authorization"},
 		AllowCredentials: true,
+		MaxAge:           86400,
 	})
 
 	var apiRouter *mux.Router
