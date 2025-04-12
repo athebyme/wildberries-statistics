@@ -106,8 +106,10 @@ func main() {
 
 	corsMiddleware := cors.New(cors.Options{
 		AllowedOrigins: []string{
-			"http://147.45.79.183:3000", // Ваш фронтенд
-			"http://localhost:3000",     // Локальная разработка
+			"http://147.45.79.183:3000",
+			"http://localhost:8080",
+			"http://localhost:8081",
+			"http://localhost:8082",
 		},
 		AllowedMethods: []string{
 			"GET", "POST", "PUT", "DELETE", "OPTIONS",
